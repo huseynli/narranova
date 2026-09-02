@@ -46,5 +46,6 @@ The OpenMOSS adapter deliberately preserves `stream=true`, PCM output,
 `stream_chunk_frames=16`, and the 6,000-token default. Reference cloning never
 sends `ref_text`. Narranova does not contain or launch the MOSS runtime.
 
-The older root `audiobook.py`, `audiobook_pipeline/`, and `webui/` trees are
-prototype inputs. New product code must not import them.
+The disposable audiobook and OpenMOSS WebUI prototypes have been removed.
+Verified lessons were reimplemented behind Narranova's production boundaries;
+the external MOSS runtime remains a separate service.
