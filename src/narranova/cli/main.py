@@ -99,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pause_parser.add_argument("job_id")
     pause_parser.add_argument("--data-dir", help="persistent data directory")
+
+    web_parser = commands.add_parser("web", help="run the local Narranova web interface")
+    web_parser.add_argument("--host", default="127.0.0.1")
+    web_parser.add_argument("--port", type=int, default=8787)
+    web_parser.add_argument("--data-dir", help="persistent data directory")
     return parser
 
 
@@ -108,6 +113,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "init":
             data_dir = _initialize(args.data_dir)
             print(f"Narranova data initialized at {data_dir}")
+            return 0
+        if args.command == "web":
+            from wsgiref.simple_server import make_server
+
+            from narranova.web import create_web_app
+
+            app = create_web_app(args.data_dir)
+            with make_server(args.host, args.port, app) as server:
+                print(f"Narranova web UI: http://{args.host}:{args.port}")
+                server.serve_forever()
             return 0
         settings, layout, repository, generation_repository = _services(args.data_dir)
         if args.command == "import":

@@ -24,6 +24,40 @@ class StoredChunk:
     duration_seconds: float | None
 
 
+@dataclass(frozen=True)
+class StoredProvider:
+    id: str
+    kind: str
+    name: str
+    endpoint_url: str
+    enabled: int
+
+
+@dataclass(frozen=True)
+class StoredVoiceProfile:
+    id: str
+    book_id: str
+    provider_name: str
+    profile: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class StoredJob:
+    id: str
+    book_id: str
+    book_title: str
+    status: str
+    error_message: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class ReusableChunk:
+    audio_artifact_path: str
+    audio_sha256: str
+    duration_seconds: float
+
+
 class GenerationRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -39,6 +73,92 @@ class GenerationRepository:
                 (provider_id, name, endpoint_url),
             )
         return provider_id
+
+    def list_providers(self) -> list[StoredProvider]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, kind, name, endpoint_url, enabled
+                FROM provider_instances ORDER BY created_at, name
+                """
+            ).fetchall()
+        return [StoredProvider(**dict(row)) for row in rows]
+
+    def list_voice_profiles(self, book_id: str) -> list[StoredVoiceProfile]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT v.id, v.book_id, p.name AS provider_name, v.profile_json
+                FROM voice_profiles v
+                JOIN provider_instances p ON p.id = v.provider_instance_id
+                WHERE v.book_id = ? ORDER BY v.created_at, v.id
+                """,
+                (book_id,),
+            ).fetchall()
+        return [
+            StoredVoiceProfile(
+                id=row["id"],
+                book_id=row["book_id"],
+                provider_name=row["provider_name"],
+                profile=json.loads(row["profile_json"]),
+            )
+            for row in rows
+        ]
+
+    def list_jobs(self, book_id: str | None = None) -> list[StoredJob]:
+        query = """
+            SELECT j.id, j.book_id, COALESCE(b.title, 'Untitled') AS book_title,
+                   j.status, j.error_message, j.created_at
+            FROM jobs j JOIN books b ON b.id = j.book_id
+        """
+        parameters: tuple[str, ...] = ()
+        if book_id is not None:
+            query += " WHERE j.book_id = ?"
+            parameters = (book_id,)
+        query += " ORDER BY j.created_at DESC, j.id DESC"
+        with self.database.connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [StoredJob(**dict(row)) for row in rows]
+
+    def get_chunk(self, job_id: str, chunk_id: str) -> StoredChunk:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id AS database_id, logical_id AS id, status, attempts,
+                       text_sha256, text_artifact_path, audio_artifact_path,
+                       audio_sha256, duration_seconds
+                FROM chunks WHERE job_id = ? AND id = ?
+                """,
+                (job_id, chunk_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Chunk not found: {chunk_id}")
+        return StoredChunk(**dict(row))
+
+    def find_reusable_chunk(
+        self,
+        *,
+        book_id: str,
+        excluding_job_id: str,
+        logical_id: str,
+        text_sha256: str,
+    ) -> ReusableChunk | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT c.audio_artifact_path, c.audio_sha256, c.duration_seconds
+                FROM chunks c
+                JOIN jobs j ON j.id = c.job_id
+                WHERE j.book_id = ? AND j.id != ? AND c.logical_id = ?
+                  AND c.text_sha256 = ? AND c.status = 'completed'
+                  AND c.audio_artifact_path IS NOT NULL
+                  AND c.audio_sha256 IS NOT NULL
+                  AND c.duration_seconds IS NOT NULL
+                ORDER BY c.updated_at DESC LIMIT 1
+                """,
+                (book_id, excluding_job_id, logical_id, text_sha256),
+            ).fetchone()
+        return ReusableChunk(**dict(row)) if row else None
 
     def add_voice_profile(
         self,

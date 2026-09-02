@@ -74,3 +74,20 @@ Running `job-run` again resumes pending or failed work and skips completed WAVs
 whose hashes and audio frames still validate. From another shell,
 `job-pause JOB_ID` requests a pause after the current provider request finishes;
 running `job-run JOB_ID` resumes it.
+
+## Web interface
+
+Run the local server against the same data directory used by the CLI:
+
+```console
+PYTHONPATH=src python -m narranova web --data-dir ./data
+```
+
+Open `http://127.0.0.1:8787`. The web interface supports EPUB upload, library
+and narration-plan review, per-section narration inclusion, OpenMOSS endpoint
+registration, approved reference voice profiles, durable job creation,
+background generation, pause/resume, status, and verified chunk playback.
+Saving section choices creates an immutable plan revision; existing jobs retain
+their original plan and new jobs use the latest revision. The server binds to
+loopback by default; use `--host` deliberately when exposing it to a trusted
+network.

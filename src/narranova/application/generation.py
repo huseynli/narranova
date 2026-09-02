@@ -125,6 +125,7 @@ class GenerationJobs:
         except Exception:
             shutil.rmtree(self.layout.job_root(book_id, job_id), ignore_errors=True)
             raise
+        self._reuse_verified_chunks(book_id, job_id)
         return job_id
 
     def run(self, job_id: str) -> None:
@@ -181,6 +182,36 @@ class GenerationJobs:
         if not path.is_relative_to(self.layout.root):
             raise RuntimeError("Stored artifact path escapes the data directory")
         return path
+
+    def _reuse_verified_chunks(self, book_id: str, job_id: str) -> None:
+        for chunk in self.generation.list_chunks(job_id):
+            reusable = self.generation.find_reusable_chunk(
+                book_id=book_id,
+                excluding_job_id=job_id,
+                logical_id=chunk.id,
+                text_sha256=chunk.text_sha256,
+            )
+            if reusable is None:
+                continue
+            source = self._artifact_path(reusable.audio_artifact_path)
+            destination = self.layout.job_chunk_master(book_id, job_id, chunk.id)
+            try:
+                validate_wave(source)
+                if self.store.sha256(source) != reusable.audio_sha256:
+                    continue
+                copied_hash = self.store.copy(source, destination)
+                if copied_hash != reusable.audio_sha256:
+                    destination.unlink(missing_ok=True)
+                    continue
+                self.generation.complete_chunk(
+                    job_id,
+                    chunk.database_id,
+                    destination.relative_to(self.layout.root).as_posix(),
+                    copied_hash,
+                    reusable.duration_seconds,
+                )
+            except (OSError, RuntimeError, ValueError):
+                destination.unlink(missing_ok=True)
 
     def _completed_chunk_is_valid(self, chunk: object) -> bool:
         if not chunk.audio_artifact_path or not chunk.audio_sha256:

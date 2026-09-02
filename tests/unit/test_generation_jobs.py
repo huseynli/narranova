@@ -8,13 +8,14 @@ from pathlib import Path
 
 from narranova.application.generation import GenerationJobs, VoiceProfiles
 from narranova.application.ingest import ImportBook
+from narranova.application.revise_plan import ReviseNarrationPlan
 from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.epub import EpubParser
 from narranova.persistence import Database
 from narranova.persistence.books import BookRepository
 from narranova.persistence.generation import GenerationRepository
 from narranova.providers.base import SynthesisRequest, SynthesisResult
-from test_epub_ingest import make_epub
+from tests.unit.test_epub_ingest import make_epub
 
 
 def make_wave(path: Path, frames: int = 240) -> None:
@@ -88,6 +89,17 @@ class GenerationJobTests(unittest.TestCase):
             self.assertEqual(repaired.status, "completed")
             self.assertEqual(repaired.attempts, 2)
             self.assertEqual(len(fake.requests), len(chunks) + 1)
+
+            ReviseNarrationPlan(books, layout, store).execute(imported.book_id, {2})
+            revised_job_id = jobs.create(imported.book_id, profile_id)
+            revised_chunks = generation.list_chunks(revised_job_id)
+            requests_before_revised_run = len(fake.requests)
+
+            self.assertEqual([chunk.id for chunk in revised_chunks], ["c0002-p0001"])
+            self.assertEqual(revised_chunks[0].status, "completed")
+            self.assertEqual(revised_chunks[0].attempts, 0)
+            jobs.run(revised_job_id)
+            self.assertEqual(len(fake.requests), requests_before_revised_run)
 
     def test_interrupted_chunk_returns_to_pending_before_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

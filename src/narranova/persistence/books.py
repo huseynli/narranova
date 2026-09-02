@@ -69,6 +69,19 @@ class BookRepository:
             ).fetchall()
         return [StoredBook(**dict(row)) for row in rows]
 
+    def get_book(self, book_id: str) -> StoredBook:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, title, author, language, status, source_sha256
+                FROM books WHERE id = ?
+                """,
+                (book_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Book not found: {book_id}")
+        return StoredBook(**dict(row))
+
     def get_plan_record(self, book_id: str) -> dict[str, Any]:
         with self.database.connect() as connection:
             row = connection.execute(
@@ -82,3 +95,26 @@ class BookRepository:
         if row is None:
             raise KeyError(f"Book not found or has no narration plan: {book_id}")
         return dict(row)
+
+    def add_plan_revision(
+        self,
+        *,
+        plan_id: str,
+        book_id: str,
+        revision: int,
+        plan_sha256: str,
+        artifact_path: str,
+    ) -> None:
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO narration_plans(
+                    id, book_id, revision, plan_sha256, artifact_path
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (plan_id, book_id, revision, plan_sha256, artifact_path),
+            )
+            connection.execute(
+                "UPDATE books SET status = 'planned', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (book_id,),
+            )

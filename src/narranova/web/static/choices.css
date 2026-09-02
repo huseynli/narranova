@@ -1,0 +1,130 @@
+.panel .plan-form {
+  display: block;
+  margin: 0;
+}
+
+.plan-form > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 22px 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.section-help {
+  max-width: 580px;
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.plan-form .chapter summary {
+  grid-template-columns: 35px minmax(0, 1fr) auto 92px;
+}
+
+.chapter-choice {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  cursor: pointer;
+}
+
+.chapter-choice input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chapter-choice i {
+  position: relative;
+  width: 34px;
+  height: 19px;
+  padding: 0;
+  border-radius: 20px;
+  background: #aaa99f;
+  transition: background 0.15s;
+}
+
+.chapter-choice i::after {
+  content: "";
+  position: absolute;
+  width: 13px;
+  height: 13px;
+  left: 3px;
+  top: 3px;
+  border-radius: 50%;
+  background: white;
+  transition: transform 0.15s;
+}
+
+.chapter-choice input:checked + i {
+  background: var(--moss);
+}
+
+.chapter-choice input:checked + i::after {
+  transform: translateX(15px);
+}
+
+.chapter-choice input:focus-visible + i {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.chapter-choice b {
+  width: 45px;
+  color: var(--muted);
+  font: 700 9px ui-monospace, monospace;
+  text-transform: uppercase;
+}
+
+.chapter-choice b::after {
+  content: "Ignored";
+}
+
+.chapter-choice input:checked ~ b::after {
+  content: "Included";
+}
+
+.chapter:has(.chapter-choice input:not(:checked)) {
+  background: #efede5;
+}
+
+.chapter:has(.chapter-choice input:not(:checked)) summary strong,
+.chapter:has(.chapter-choice input:not(:checked)) .units {
+  opacity: 0.48;
+}
+
+.plan-save {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+  padding: 18px 22px;
+  background: #ece9df;
+}
+
+.plan-save span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+@media (max-width: 820px) {
+  .plan-form > header,
+  .plan-save {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .plan-form .chapter summary {
+    grid-template-columns: 28px minmax(0, 1fr) 84px;
+  }
+
+  .plan-form .chapter summary > small,
+  .chapter-choice b {
+    display: none;
+  }
+}
