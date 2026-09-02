@@ -553,6 +553,37 @@ class GenerationRepository:
                 (job_id, chunk_id),
             )
 
+    def begin_chunk_regeneration(self, job_id: str, chunk_id: str) -> None:
+        with self.database.connect() as connection:
+            job = connection.execute(
+                "SELECT status FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if job is None:
+                raise KeyError(f"Generation job not found: {job_id}")
+            if job["status"] in {"generating", "pause_requested", "assembling"}:
+                raise ValueError("Wait for the active generation to stop before regenerating")
+            chunk = connection.execute(
+                "SELECT status FROM chunks WHERE job_id = ? AND id = ?",
+                (job_id, chunk_id),
+            ).fetchone()
+            if chunk is None:
+                raise KeyError(f"Chunk not found: {chunk_id}")
+            if chunk["status"] != "completed":
+                raise ValueError("Only a completed audio chunk can be regenerated")
+            connection.execute(
+                "UPDATE jobs SET status = 'generating', error_message = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (job_id,),
+            )
+            connection.execute(
+                """
+                UPDATE chunks SET status = 'generating', attempts = attempts + 1,
+                                  updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ? AND id = ?
+                """,
+                (job_id, chunk_id),
+            )
+
     def complete_chunk(
         self, job_id: str, chunk_id: str, path: str, sha256: str, duration: float
     ) -> None:
@@ -577,6 +608,31 @@ class GenerationRepository:
             connection.execute(
                 """
                 UPDATE chunks SET status = 'failed', error_history_json = ?,
+                                  updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ? AND id = ?
+                """,
+                (json.dumps(errors), job_id, chunk_id),
+            )
+            connection.execute(
+                "UPDATE jobs SET status = 'failed', error_message = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (message, job_id),
+            )
+
+    def fail_chunk_regeneration(self, job_id: str, chunk_id: str, message: str) -> None:
+        """Record a failed retry while keeping the previously verified audio usable."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT error_history_json FROM chunks WHERE job_id = ? AND id = ?",
+                (job_id, chunk_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Chunk not found: {chunk_id}")
+            errors = json.loads(row[0])
+            errors.append({"message": message})
+            connection.execute(
+                """
+                UPDATE chunks SET status = 'completed', error_history_json = ?,
                                   updated_at = CURRENT_TIMESTAMP
                 WHERE job_id = ? AND id = ?
                 """,
@@ -616,6 +672,29 @@ class GenerationRepository:
                 "UPDATE jobs SET status = 'completed', error_message = NULL, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (job_id,),
+            )
+
+    def finish_chunk_regeneration(self, job_id: str) -> None:
+        with self.database.connect() as connection:
+            job = connection.execute(
+                "SELECT status FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if job is None:
+                raise KeyError(f"Generation job not found: {job_id}")
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM chunks WHERE job_id = ? AND status != 'completed'",
+                (job_id,),
+            ).fetchone()[0]
+            if remaining == 0:
+                status = "completed"
+            elif job["status"] == "pause_requested":
+                status = "paused"
+            else:
+                status = "ready"
+            connection.execute(
+                "UPDATE jobs SET status = ?, error_message = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (status, job_id),
             )
 
     def delete_generated_chunk(self, job_id: str, chunk_id: str) -> None:

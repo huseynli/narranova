@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import uuid
 from pathlib import Path
@@ -362,6 +363,66 @@ class GenerationJobs:
                 self.generation.fail_chunk(job_id, chunk.database_id, str(exc))
                 raise
         self.generation.complete_job(job_id)
+
+    def prepare_chunk_regeneration(self, job_id: str, chunk_id: str) -> None:
+        chunk = self.generation.get_chunk(job_id, chunk_id)
+        if chunk.status != "completed" or not self._completed_chunk_is_valid(chunk):
+            raise ValueError("Only a verified, completed audio chunk can be regenerated")
+        self.generation.begin_chunk_regeneration(job_id, chunk_id)
+
+    def regenerate_chunk(
+        self, job_id: str, chunk_id: str, *, prepared: bool = False
+    ) -> None:
+        """Replace one chunk atomically while leaving every other chunk untouched."""
+        if not prepared:
+            self.prepare_chunk_regeneration(job_id, chunk_id)
+        job = self.generation.get_job(job_id)
+        chunk = self.generation.get_chunk(job_id, chunk_id)
+        profile = job["profile"]
+        destination = self.layout.job_chunk_master(job["book_id"], job_id, chunk.id)
+        temporary = destination.with_name(
+            f".{destination.stem}.regenerating-{uuid.uuid4().hex}{destination.suffix}"
+        )
+        try:
+            if hashlib.sha256(_canonical_json(profile).encode("utf-8")).hexdigest() != job[
+                "profile_sha256"
+            ]:
+                raise RuntimeError("Voice profile failed hash validation")
+            reference = self._artifact_path(profile["reference_artifact_path"])
+            if self.store.sha256(reference) != profile["reference_sha256"]:
+                raise RuntimeError("Voice reference failed hash validation")
+            text_path = self._artifact_path(chunk.text_artifact_path)
+            text = text_path.read_text(encoding="utf-8").rstrip("\n")
+            if text_sha256(text) != chunk.text_sha256:
+                raise RuntimeError(f"Synthesis text failed hash validation: {chunk.id}")
+            result = self.provider_factory(job).synthesize(
+                SynthesisRequest(
+                    text=text,
+                    destination=temporary,
+                    language=profile.get("language"),
+                    instruction=profile["instruction"],
+                    reference_audio=reference,
+                )
+            )
+            if result.audio_path.resolve() != temporary.resolve():
+                raise RuntimeError("TTS provider returned an unexpected audio path")
+            validate_wave(temporary)
+            regenerated_hash = self.store.sha256(temporary)
+            if regenerated_hash != result.audio_sha256:
+                raise RuntimeError("Regenerated audio failed hash validation")
+            os.replace(temporary, destination)
+            self.generation.complete_chunk(
+                job_id,
+                chunk.database_id,
+                destination.relative_to(self.layout.root).as_posix(),
+                regenerated_hash,
+                result.duration_seconds,
+            )
+            self.generation.finish_chunk_regeneration(job_id)
+        except Exception as exc:
+            temporary.unlink(missing_ok=True)
+            self.generation.fail_chunk_regeneration(job_id, chunk.database_id, str(exc))
+            raise
 
     def _artifact_path(self, relative_path: str) -> Path:
         path = (self.layout.root / relative_path).resolve()

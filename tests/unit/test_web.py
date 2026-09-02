@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from urllib.parse import urlencode
 
+from narranova.cli.main import ThreadingWSGIServer
 from narranova.web import create_web_app
 from tests.unit.test_epub_ingest import make_epub
 from tests.unit.test_generation_jobs import make_wave
@@ -20,6 +21,7 @@ def request(
     body: bytes = b"",
     cookie: str = "",
     content_type: str = "application/x-www-form-urlencoded",
+    range_header: str = "",
 ):
     captured: dict[str, object] = {}
 
@@ -35,6 +37,7 @@ def request(
         "CONTENT_TYPE": content_type,
         "wsgi.input": io.BytesIO(body),
         "HTTP_COOKIE": cookie,
+        "HTTP_RANGE": range_header,
     }
     content = b"".join(app(environ, start_response))
     return str(captured["status"]), list(captured["headers"]), content
@@ -102,8 +105,10 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"narranova_theme=", script)
             self.assertIn(b"data-job-monitor", script)
             self.assertIn(b"window.setTimeout(pollJob", script)
+            self.assertIn(b'Regenerate', script)
             self.assertNotIn(b"location.reload", script)
             self.assertIn(("Content-Type", "text/javascript; charset=utf-8"), headers)
+            self.assertTrue(ThreadingWSGIServer.daemon_threads)
 
             status, headers, bootstrap = request(app, "/static/theme.js")
             self.assertEqual(status, "200 OK")
@@ -476,6 +481,12 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"data-job-pause", job_page)
             self.assertIn(download_path.encode(), job_page)
             self.assertIn(b'class="chunk-action-links"', job_page)
+            self.assertIn(
+                f'/jobs/{job_id}/chunks/{chunk.database_id}/regenerate'.encode(),
+                job_page,
+            )
+            self.assertIn(b"data-chunk-regenerate disabled", job_page)
+            self.assertIn(b">Regenerate</button>", job_page)
             self.assertIn(b">Download</a>", job_page)
             self.assertIn(b">Delete</a>", job_page)
 
@@ -484,8 +495,18 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(("Content-Type", "application/json; charset=utf-8"), headers)
             state = json.loads(state_body)
             self.assertEqual(state["status"], "generating")
+            self.assertFalse(state["regenerating"])
             self.assertEqual(state["completed"], 1)
             self.assertEqual(state["percent"], 50)
+
+            app.supervisor.is_regenerating = lambda active_job_id: True
+            status, _, regenerating_page = request(app, f"/jobs/{job_id}")
+            self.assertEqual(status, "200 OK")
+            self.assertIn(b"Regenerating chunk", regenerating_page)
+            self.assertIn(b"data-job-pause hidden", regenerating_page)
+            status, _, regenerating_state_body = request(app, f"/jobs/{job_id}/status")
+            self.assertEqual(status, "200 OK")
+            self.assertTrue(json.loads(regenerating_state_body)["regenerating"])
 
             status, headers, audio = request(app, download_path)
             self.assertEqual(status, "200 OK")
@@ -495,6 +516,19 @@ class WebAppTests(unittest.TestCase):
                 headers,
             )
             self.assertEqual(audio, audio_path.read_bytes())
+
+            status, headers, partial = request(
+                app,
+                f"/jobs/{job_id}/chunks/{chunk.database_id}/audio",
+                range_header="bytes=0-15",
+            )
+            self.assertEqual(status, "206 Partial Content")
+            self.assertIn(("Accept-Ranges", "bytes"), headers)
+            self.assertIn(
+                ("Content-Range", f"bytes 0-15/{audio_path.stat().st_size}"),
+                headers,
+            )
+            self.assertEqual(partial, audio_path.read_bytes()[:16])
 
 
 if __name__ == "__main__":

@@ -801,6 +801,18 @@ audio { width: 100%; height: 36px; }
 .chunk-row > div:first-child { display: grid; grid-template-columns: 110px 100px 1fr; align-items: center; gap: 12px; }
 .chunk-actions { display: grid; grid-template-columns: minmax(220px,360px) auto; align-items: center; gap: 14px; }
 .chunk-action-links { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
+.chunk-action-links form { margin: 0; }
+.chunk-regenerate {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-dark);
+  font-size: 11px;
+  font-weight: 800;
+}
+.chunk-regenerate:hover:not(:disabled) { background: transparent; color: var(--ink); }
+.chunk-regenerate:disabled { opacity: .42; cursor: not-allowed; }
 .chunk-download { color: var(--accent-dark); font-size: 11px; font-weight: 800; white-space: nowrap; }
 .chunk-download:hover { color: var(--ink); }
 .mono { color: var(--muted); font: 11px ui-monospace, monospace; }

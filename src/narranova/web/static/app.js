@@ -56,7 +56,7 @@ function setJobControl(name, visible) {
   if (control) control.hidden = !visible;
 }
 
-function addChunkActions(jobId, chunkId, container) {
+function addChunkActions(jobId, chunkId, container, regenerationDisabled) {
   if (container.querySelector("audio")) return;
   const base = `/jobs/${encodeURIComponent(jobId)}/chunks/${encodeURIComponent(chunkId)}`;
   const audio = document.createElement("audio");
@@ -66,6 +66,19 @@ function addChunkActions(jobId, chunkId, container) {
 
   const links = document.createElement("span");
   links.className = "chunk-action-links";
+  const regenerateForm = document.createElement("form");
+  regenerateForm.method = "post";
+  regenerateForm.action = `${base}/regenerate`;
+  const csrf = document.createElement("input");
+  csrf.type = "hidden";
+  csrf.name = "csrf";
+  csrf.value = jobMonitor.dataset.csrf;
+  const regenerate = document.createElement("button");
+  regenerate.className = "chunk-regenerate";
+  regenerate.dataset.chunkRegenerate = "";
+  regenerate.disabled = regenerationDisabled;
+  regenerate.textContent = "Regenerate";
+  regenerateForm.append(csrf, regenerate);
   const download = document.createElement("a");
   download.className = "chunk-download";
   download.href = `${base}/download`;
@@ -74,7 +87,7 @@ function addChunkActions(jobId, chunkId, container) {
   remove.className = "danger-link";
   remove.href = `${base}/delete`;
   remove.textContent = "Delete";
-  links.append(download, remove);
+  links.append(regenerateForm, download, remove);
   container.append(audio, links);
 }
 
@@ -98,18 +111,28 @@ function updateJobPage(state) {
     error.hidden = !state.error;
   }
 
+  const jobActive = ["generating", "pause_requested", "assembling"].includes(status);
   const startable = ["ready", "failed", "paused"].includes(status);
   setJobControl("start", startable);
   setJobControl("running", ["generating", "assembling"].includes(status));
-  setJobControl("pause", status === "generating");
+  setJobControl("pause", status === "generating" && !state.regenerating);
   setJobControl("pause-requested", status === "pause_requested");
   setJobControl("complete", status === "completed");
+  const runningLabel = document.querySelector("[data-job-running-label]");
+  if (runningLabel) {
+    runningLabel.textContent = state.regenerating
+      ? "Regenerating chunk"
+      : "Generation in progress";
+  }
   const startLabel = document.querySelector("[data-job-start-label]");
   if (startLabel) {
     startLabel.textContent = ["failed", "paused"].includes(status)
       ? "Resume generation"
       : "Start generation";
   }
+  document.querySelectorAll("[data-chunk-regenerate]").forEach((button) => {
+    button.disabled = jobActive;
+  });
 
   state.chunks.forEach((chunk) => {
     const row = document.querySelector(`[data-chunk-id="${chunk.id}"]`);
@@ -124,10 +147,12 @@ function updateJobPage(state) {
     }
     if (chunk.status === "completed") {
       const actions = row.querySelector("[data-chunk-actions]");
-      if (actions) addChunkActions(jobMonitor.dataset.jobId, chunk.id, actions);
+      if (actions) {
+        addChunkActions(jobMonitor.dataset.jobId, chunk.id, actions, jobActive);
+      }
     }
   });
-  return ["generating", "pause_requested", "assembling"].includes(status);
+  return jobActive;
 }
 
 if (jobMonitor) {

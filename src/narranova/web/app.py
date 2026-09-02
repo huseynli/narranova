@@ -50,26 +50,47 @@ class JobSupervisor:
     def __init__(self, jobs: GenerationJobs) -> None:
         self.jobs = jobs
         self._lock = threading.Lock()
-        self._active: set[str] = set()
+        self._active: dict[str, str] = {}
 
     def start(self, job_id: str) -> bool:
         with self._lock:
             if job_id in self._active:
                 return False
-            self._active.add(job_id)
+            self._active[job_id] = "job"
         try:
             self.jobs.prepare(job_id)
         except Exception:
             with self._lock:
-                self._active.discard(job_id)
+                self._active.pop(job_id, None)
             raise
         thread = threading.Thread(target=self._run, args=(job_id,), daemon=True)
+        thread.start()
+        return True
+
+    def regenerate(self, job_id: str, chunk_id: str) -> bool:
+        with self._lock:
+            if job_id in self._active:
+                return False
+            self._active[job_id] = "chunk"
+        try:
+            self.jobs.prepare_chunk_regeneration(job_id, chunk_id)
+        except Exception:
+            with self._lock:
+                self._active.pop(job_id, None)
+            raise
+        thread = threading.Thread(
+            target=self._regenerate, args=(job_id, chunk_id), daemon=True
+        )
         thread.start()
         return True
 
     def is_active(self, job_id: str) -> bool:
         with self._lock:
             return job_id in self._active
+
+    def is_regenerating(self, job_id: str) -> bool:
+        with self._lock:
+            return self._active.get(job_id) == "chunk"
 
     def _run(self, job_id: str) -> None:
         try:
@@ -79,7 +100,17 @@ class JobSupervisor:
             pass
         finally:
             with self._lock:
-                self._active.discard(job_id)
+                self._active.pop(job_id, None)
+
+    def _regenerate(self, job_id: str, chunk_id: str) -> None:
+        try:
+            self.jobs.regenerate_chunk(job_id, chunk_id, prepared=True)
+        except Exception:
+            # The job engine records regeneration failures durably for the UI.
+            pass
+        finally:
+            with self._lock:
+                self._active.pop(job_id, None)
 
 
 class NarranovaWebApp:
@@ -287,6 +318,7 @@ class NarranovaWebApp:
                     start_response,
                     parts[1],
                     parts[3],
+                    range_header=str(environ.get("HTTP_RANGE", "")),
                     download=parts[4] == "download",
                 )
             if method == "POST":
@@ -416,6 +448,19 @@ class NarranovaWebApp:
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "pause":
             self.generation.request_pause(parts[1])
             return self._redirect(start_response, f"/jobs/{parts[1]}?notice=Pause+requested")
+        if (
+            len(parts) == 5
+            and parts[0] == "jobs"
+            and parts[2] == "chunks"
+            and parts[4] == "regenerate"
+        ):
+            started = self.supervisor.regenerate(parts[1], parts[3])
+            notice = (
+                "Chunk+regeneration+started"
+                if started
+                else "Generation+is+already+running"
+            )
+            return self._redirect(start_response, f"/jobs/{parts[1]}?notice={notice}")
         if len(parts) == 5 and parts[0] == "jobs" and parts[2] == "chunks" and parts[4] == "delete":
             if self.supervisor.is_active(parts[1]):
                 raise ValueError("Pause the generation job before deleting its audio")
@@ -696,18 +741,27 @@ class NarranovaWebApp:
         chunks = self.generation.list_chunks(job_id)
         completed = sum(chunk.status == "completed" for chunk in chunks)
         percent = round((completed / len(chunks)) * 100) if chunks else 0
+        status = str(job["status"])
+        regenerating = self.supervisor.is_regenerating(job_id)
+        regeneration_disabled = status in {"generating", "pause_requested", "assembling"}
         chunk_rows = "".join(
-            f"""<article class="chunk-row" data-chunk-id="{self._e(chunk.database_id)}"><div><span class="mono">{self._e(chunk.id)}</span><strong data-chunk-status>{self._e(chunk.status)}</strong><small data-chunk-meta>{chunk.attempts} attempt{'s' if chunk.attempts != 1 else ''}{f' · {chunk.duration_seconds:.1f}s' if chunk.duration_seconds else ''}</small></div><div class="chunk-actions" data-chunk-actions>{f'<audio controls preload="none" src="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/audio"></audio><span class="chunk-action-links"><a class="chunk-download" href="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/download">Download</a><a class="danger-link" href="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/delete">Delete</a></span>' if chunk.status == 'completed' else ''}</div></article>"""
+            f"""<article class="chunk-row" data-chunk-id="{self._e(chunk.database_id)}"><div><span class="mono">{self._e(chunk.id)}</span><strong data-chunk-status>{self._e(chunk.status)}</strong><small data-chunk-meta>{chunk.attempts} attempt{'s' if chunk.attempts != 1 else ''}{f' · {chunk.duration_seconds:.1f}s' if chunk.duration_seconds else ''}</small></div><div class="chunk-actions" data-chunk-actions>{self._chunk_actions(job_id, chunk.database_id, csrf, regeneration_disabled) if chunk.status == 'completed' else ''}</div></article>"""
             for chunk in chunks
         )
-        status = str(job["status"])
         startable = status in {"ready", "failed", "paused"}
         start_label = "Resume generation" if status in {"failed", "paused"} else "Start generation"
-        controls = f"""<form method="post" action="/jobs/{self._e(job_id)}/run" data-job-start{' hidden' if not startable else ''}>{self._csrf(csrf)}<button class="primary" data-job-start-label>{start_label}</button></form><span class="running-mark" data-job-running{' hidden' if status not in {'generating', 'assembling'} else ''}><i></i>Generation in progress</span><form method="post" action="/jobs/{self._e(job_id)}/pause" data-job-pause{' hidden' if status != 'generating' else ''}>{self._csrf(csrf)}<button>Pause after chunk</button></form><span class="pause-mark" data-job-pause-requested{' hidden' if status != 'pause_requested' else ''}>Pause requested · finishing current chunk</span><span class="complete-mark" data-job-complete{' hidden' if status != 'completed' else ''}>✓ Generation complete</span><a class="danger-link job-delete" href="/jobs/{self._e(job_id)}/delete">Delete job</a>"""
+        controls = f"""<form method="post" action="/jobs/{self._e(job_id)}/run" data-job-start{' hidden' if not startable else ''}>{self._csrf(csrf)}<button class="primary" data-job-start-label>{start_label}</button></form><span class="running-mark" data-job-running{' hidden' if status not in {'generating', 'assembling'} else ''}><i></i><b data-job-running-label>{'Regenerating chunk' if regenerating else 'Generation in progress'}</b></span><form method="post" action="/jobs/{self._e(job_id)}/pause" data-job-pause{' hidden' if status != 'generating' or regenerating else ''}>{self._csrf(csrf)}<button>Pause after chunk</button></form><span class="pause-mark" data-job-pause-requested{' hidden' if status != 'pause_requested' else ''}>Pause requested · finishing current chunk</span><span class="complete-mark" data-job-complete{' hidden' if status != 'completed' else ''}>✓ Generation complete</span><a class="danger-link job-delete" href="/jobs/{self._e(job_id)}/delete">Delete job</a>"""
         error_message = str(job.get("error_message") or "")
         error = f'<div class="alert" data-job-error{"" if error_message else " hidden"}>{self._e(error_message)}</div>'
-        body = f"""<a class="back" href="/books/{self._e(job['book_id'])}">← Back to book</a><section class="job-head full-page-heading"><div><p class="eyebrow">Generation job</p><h1>{self._e(job_id[:12])}</h1><p data-job-summary>{completed} of {len(chunks)} chunks complete</p></div><span class="status status-{self._e(status)}" data-job-status>{self._e(status)}</span></section>{error}<section class="panel progress-panel" data-job-monitor data-job-id="{self._e(job_id)}"><div class="progress-copy"><strong data-job-percent>{percent}%</strong><span>verified audio</span></div><div class="progress"><i data-job-progress-bar style="width:{percent}%"></i></div><div class="job-actions">{controls}</div></section><section class="panel chunks"><header><div><p class="eyebrow">Artifacts</p><h2>Audio chunks</h2></div><span class="count">{len(chunks):02d}</span></header>{chunk_rows}</section>"""
+        body = f"""<a class="back" href="/books/{self._e(job['book_id'])}">← Back to book</a><section class="job-head full-page-heading"><div><p class="eyebrow">Generation job</p><h1>{self._e(job_id[:12])}</h1><p data-job-summary>{completed} of {len(chunks)} chunks complete</p></div><span class="status status-{self._e(status)}" data-job-status>{self._e(status)}</span></section>{error}<section class="panel progress-panel" data-job-monitor data-job-id="{self._e(job_id)}" data-csrf="{self._e(csrf)}"><div class="progress-copy"><strong data-job-percent>{percent}%</strong><span>verified audio</span></div><div class="progress"><i data-job-progress-bar style="width:{percent}%"></i></div><div class="job-actions">{controls}</div></section><section class="panel chunks"><header><div><p class="eyebrow">Artifacts</p><h2>Audio chunks</h2></div><span class="count">{len(chunks):02d}</span></header>{chunk_rows}</section>"""
         return self._layout("Generation", body, environ)
+
+    def _chunk_actions(
+        self, job_id: str, chunk_id: str, csrf: str, regeneration_disabled: bool
+    ) -> str:
+        base = f"/jobs/{self._e(job_id)}/chunks/{self._e(chunk_id)}"
+        disabled = " disabled" if regeneration_disabled else ""
+        return f"""<audio controls preload="none" src="{base}/audio"></audio><span class="chunk-action-links"><form method="post" action="{base}/regenerate">{self._csrf(csrf)}<button class="chunk-regenerate" data-chunk-regenerate{disabled}>Regenerate</button></form><a class="chunk-download" href="{base}/download">Download</a><a class="danger-link" href="{base}/delete">Delete</a></span>"""
 
     def _job_state(self, start_response: StartResponse, job_id: str) -> Iterable[bytes]:
         job = self.generation.get_job(job_id)
@@ -717,6 +771,7 @@ class NarranovaWebApp:
         content = json.dumps(
             {
                 "status": job["status"],
+                "regenerating": self.supervisor.is_regenerating(job_id),
                 "error": job.get("error_message") or "",
                 "completed": completed,
                 "total": len(chunks),
@@ -760,6 +815,7 @@ class NarranovaWebApp:
         job_id: str,
         chunk_id: str,
         *,
+        range_header: str = "",
         download: bool = False,
     ) -> Iterable[bytes]:
         chunk = self.generation.get_chunk(job_id, chunk_id)
@@ -769,7 +825,7 @@ class NarranovaWebApp:
         validate_wave(path)
         if self.store.sha256(path) != chunk.audio_sha256:
             raise RuntimeError("Audio failed hash validation")
-        headers = None
+        headers: list[tuple[str, str]] = [("Accept-Ranges", "bytes")]
         if download:
             safe_name = "".join(
                 character
@@ -777,7 +833,31 @@ class NarranovaWebApp:
                 if character.isascii()
                 and (character.isalnum() or character in {"-", "_"})
             ) or "chunk"
-            headers = [("Content-Disposition", f'attachment; filename="{safe_name}.wav"')]
+            headers.append(
+                ("Content-Disposition", f'attachment; filename="{safe_name}.wav"')
+            )
+        size = path.stat().st_size
+        byte_range = self._audio_range(range_header, size) if not download else None
+        if range_header and not download and byte_range is None:
+            return self._respond(
+                start_response,
+                "416 Range Not Satisfiable",
+                b"",
+                "audio/wav",
+                headers=headers + [("Content-Range", f"bytes */{size}")],
+            )
+        if byte_range is not None:
+            start, end = byte_range
+            with path.open("rb") as audio:
+                audio.seek(start)
+                content = audio.read(end - start + 1)
+            return self._respond(
+                start_response,
+                "206 Partial Content",
+                content,
+                "audio/wav",
+                headers=headers + [("Content-Range", f"bytes {start}-{end}/{size}")],
+            )
         return self._respond(
             start_response,
             "200 OK",
@@ -785,6 +865,28 @@ class NarranovaWebApp:
             "audio/wav",
             headers=headers,
         )
+
+    @staticmethod
+    def _audio_range(header: str, size: int) -> tuple[int, int] | None:
+        if not header.startswith("bytes=") or "," in header or size <= 0:
+            return None
+        value = header.removeprefix("bytes=").strip()
+        if "-" not in value:
+            return None
+        first, last = value.split("-", 1)
+        try:
+            if not first:
+                suffix = int(last)
+                if suffix <= 0:
+                    return None
+                return max(0, size - suffix), size - 1
+            start = int(first)
+            end = int(last) if last else size - 1
+        except ValueError:
+            return None
+        if start < 0 or start >= size or end < start:
+            return None
+        return start, min(end, size - 1)
 
     def _studio_audio(
         self,

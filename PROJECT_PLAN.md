@@ -417,9 +417,12 @@ Rules:
   fresh pending, job-owned chunks and never adopts audio from another job.
 - The job page polls structured status updates and patches progress in place;
   it must never refresh the whole document or interrupt chunk playback.
+- Chunk audio supports byte-range playback, and the local web server handles
+  concurrent requests so one paused player cannot block another.
 - Failed chunks retain error history and may be retried independently.
 - A completed chunk can be explicitly regenerated without affecting unrelated
-  chunks.
+  chunks. Its verified WAV remains in place until a replacement succeeds, and
+  this single-chunk operation does not expose the full-job pause control.
 - If a chunk changes, its chapter and final M4B become stale and must be rebuilt.
 - Default generation concurrency is one.
 - Retry policy, backoff, provider request IDs, timings, audio duration, RTF,

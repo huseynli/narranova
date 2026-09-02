@@ -6,7 +6,9 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from socketserver import ThreadingMixIn
 from typing import Sequence
+from wsgiref.simple_server import WSGIServer
 
 from narranova import __version__
 from narranova.application.generation import GenerationJobs, VoiceProfiles
@@ -17,6 +19,12 @@ from narranova.epub import EpubError, EpubParser
 from narranova.persistence import Database
 from narranova.persistence.books import BookRepository
 from narranova.persistence.generation import GenerationRepository
+
+
+class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    """Serve audio and page requests concurrently for the local web UI."""
+
+    daemon_threads = True
 
 
 def _initialize(data_dir: str | Path | None) -> Path:
@@ -125,7 +133,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             from narranova.web import create_web_app
 
             app = create_web_app(args.data_dir)
-            with make_server(args.host, args.port, app) as server:
+            with make_server(
+                args.host, args.port, app, server_class=ThreadingWSGIServer
+            ) as server:
                 print(f"Narranova web UI: http://{args.host}:{args.port}")
                 server.serve_forever()
             return 0

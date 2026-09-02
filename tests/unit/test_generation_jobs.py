@@ -30,9 +30,12 @@ def make_wave(path: Path, frames: int = 240) -> None:
 class FakeProvider:
     def __init__(self) -> None:
         self.requests: list[SynthesisRequest] = []
+        self.failure_message: str | None = None
 
     def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
         self.requests.append(request)
+        if self.failure_message:
+            raise RuntimeError(self.failure_message)
         make_wave(request.destination)
         digest = hashlib.sha256(request.destination.read_bytes()).hexdigest()
         return SynthesisResult(request.destination, digest, 0.01)
@@ -159,6 +162,80 @@ class GenerationJobTests(unittest.TestCase):
             self.assertEqual(revised_chunks[0].attempts, 0)
             jobs.run(revised_job_id)
             self.assertEqual(len(fake.requests), requests_before_revised_run + 1)
+
+    def test_regenerates_only_the_selected_chunk_and_preserves_the_old_audio_on_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            source = root / "book.epub"
+            reference = root / "reference.wav"
+            make_epub(source)
+            make_wave(reference)
+            layout = ArtifactLayout.at(data)
+            layout.initialize()
+            store = ArtifactStore(data)
+            database = Database(data / "narranova.sqlite3")
+            database.initialize()
+            books = BookRepository(database)
+            generation = GenerationRepository(database)
+            imported = ImportBook(EpubParser(), books, layout, store).execute(source)
+            profiles = VoiceProfiles(generation, layout, store)
+            provider_id = profiles.add_openmoss_provider(
+                "Test MOSS", "http://moss.test:8000/tts"
+            )
+            profile_id = profiles.create_openmoss_profile(
+                provider_id=provider_id,
+                reference_audio=reference,
+                instruction="A steady narrator.",
+                name="Steady narrator",
+            )
+            fake = FakeProvider()
+            jobs = GenerationJobs(
+                books, generation, layout, store, provider_factory=lambda job: fake
+            )
+            job_id = jobs.create(imported.book_id, profile_id)
+            jobs.run(job_id)
+            chunks = generation.list_chunks(job_id)
+            selected = chunks[0]
+            untouched = chunks[1]
+
+            jobs.regenerate_chunk(job_id, selected.database_id)
+
+            regenerated = generation.get_chunk(job_id, selected.database_id)
+            self.assertEqual(generation.get_job(job_id)["status"], "completed")
+            self.assertEqual(regenerated.status, "completed")
+            self.assertEqual(regenerated.attempts, 2)
+            self.assertEqual(
+                generation.get_chunk(job_id, untouched.database_id).attempts,
+                1,
+            )
+            self.assertEqual(len(fake.requests), len(chunks) + 1)
+
+            audio_path = data / regenerated.audio_artifact_path
+            previous_audio = audio_path.read_bytes()
+            fake.failure_message = "The retry was rejected"
+            with self.assertRaisesRegex(RuntimeError, "retry was rejected"):
+                jobs.regenerate_chunk(job_id, selected.database_id)
+
+            preserved = generation.get_chunk(job_id, selected.database_id)
+            failed_job = generation.get_job(job_id)
+            self.assertEqual(preserved.status, "completed")
+            self.assertEqual(preserved.attempts, 3)
+            self.assertEqual(audio_path.read_bytes(), previous_audio)
+            self.assertEqual(failed_job["status"], "failed")
+            self.assertEqual(failed_job["error_message"], "The retry was rejected")
+
+            fake.failure_message = None
+            jobs.regenerate_chunk(job_id, selected.database_id)
+            retried_job = generation.get_job(job_id)
+            self.assertEqual(retried_job["status"], "completed")
+            self.assertIsNone(retried_job["error_message"])
+            self.assertEqual(
+                generation.get_chunk(job_id, selected.database_id).attempts,
+                4,
+            )
 
     def test_legacy_zero_attempt_audio_is_removed_and_job_is_reopened(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
