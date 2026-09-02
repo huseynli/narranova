@@ -118,3 +118,9 @@ class BookRepository:
                 "UPDATE books SET status = 'planned', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (book_id,),
             )
+
+    def delete_book(self, book_id: str) -> None:
+        with self.database.connect() as connection:
+            cursor = connection.execute("DELETE FROM books WHERE id = ?", (book_id,))
+        if cursor.rowcount != 1:
+            raise KeyError(f"Book not found: {book_id}")

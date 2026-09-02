@@ -156,6 +156,36 @@ class WebAppTests(unittest.TestCase):
             self.assertIn("revision+2", next(v for n, v in response_headers if n == "Location"))
             self.assertEqual(app.books.get_plan_record(imported.book_id)["revision"], 2)
 
+    def test_book_deletion_requires_confirmation_and_removes_the_book(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "book.epub"
+            make_epub(source)
+            app = create_web_app(root / "data")
+            imported = app.import_book.execute(source)
+
+            status, headers, page = request(app, f"/books/{imported.book_id}/delete")
+            cookie = next(value for name, value in headers if name == "Set-Cookie")
+            token = cookie.split(";", 1)[0].split("=", 1)[1]
+            self.assertEqual(status, "200 OK")
+            self.assertIn(b"Delete book permanently", page)
+            self.assertIn(b"This permanently deletes", page)
+
+            status, response_headers, _ = request(
+                app,
+                f"/books/{imported.book_id}/delete",
+                method="POST",
+                body=urlencode({"csrf": token}).encode(),
+                cookie=cookie,
+            )
+
+            self.assertEqual(status, "303 See Other")
+            self.assertEqual(
+                next(value for name, value in response_headers if name == "Location"),
+                "/?notice=Book+deleted",
+            )
+            self.assertEqual(app.books.list_books(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

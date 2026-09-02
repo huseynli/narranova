@@ -252,9 +252,11 @@ class GenerationRepository:
         with self.database.connect() as connection:
             row = connection.execute(
                 """
-                SELECT j.*, v.profile_json, v.profile_sha256,
+                SELECT j.*, COALESCE(b.title, 'Untitled') AS book_title,
+                       v.profile_json, v.profile_sha256,
                        p.kind AS provider_kind, p.endpoint_url, p.configuration_json
                 FROM jobs j
+                JOIN books b ON b.id = j.book_id
                 JOIN voice_profiles v ON v.id = j.voice_profile_id
                 JOIN provider_instances p ON p.id = v.provider_instance_id
                 WHERE j.id = ?
@@ -397,3 +399,57 @@ class GenerationRepository:
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (job_id,),
             )
+
+    def delete_generated_chunk(self, job_id: str, chunk_id: str) -> None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM chunks WHERE job_id = ? AND id = ?",
+                (job_id, chunk_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Chunk not found: {chunk_id}")
+            if row["status"] == "generating":
+                raise ValueError("An actively generating chunk cannot be deleted")
+            connection.execute(
+                """
+                UPDATE chunks SET status = 'pending', audio_artifact_path = NULL,
+                    audio_sha256 = NULL, duration_seconds = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ? AND id = ?
+                """,
+                (job_id, chunk_id),
+            )
+            connection.execute(
+                """
+                UPDATE jobs SET status = CASE
+                    WHEN status IN ('completed', 'failed') THEN 'ready'
+                    ELSE status END,
+                    error_message = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (job_id,),
+            )
+
+    def delete_job(self, job_id: str) -> str:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT book_id, status FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Generation job not found: {job_id}")
+            if row["status"] in {"generating", "pause_requested"}:
+                raise ValueError("Pause the generation job before deleting it")
+            connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        return str(row["book_id"])
+
+    def book_has_active_jobs(self, book_id: str) -> bool:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM jobs
+                WHERE book_id = ? AND status IN ('generating', 'pause_requested')
+                LIMIT 1
+                """,
+                (book_id,),
+            ).fetchone()
+        return row is not None
