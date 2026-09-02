@@ -1,3 +1,50 @@
+const themeToggle = document.querySelector("[data-theme-toggle]");
+const themeLabel = document.querySelector("[data-theme-label]");
+const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
+
+function storedTheme() {
+  try {
+    const localTheme = localStorage.getItem("narranova-theme");
+    if (localTheme === "light" || localTheme === "dark") return localTheme;
+  } catch (error) {
+    // Fall through to the same-site cookie when storage is unavailable.
+  }
+  const cookieTheme = document.cookie
+    .split(";")
+    .map((value) => value.trim())
+    .find((value) => value.startsWith("narranova_theme="))
+    ?.split("=")[1];
+  return cookieTheme === "light" || cookieTheme === "dark" ? cookieTheme : null;
+}
+
+function applyTheme(theme, persist = false) {
+  document.documentElement.dataset.theme = theme;
+  if (persist) {
+    try {
+      localStorage.setItem("narranova-theme", theme);
+    } catch (error) {
+      // The theme still applies for this page when storage is unavailable.
+    }
+    document.cookie = `narranova_theme=${theme}; Path=/; Max-Age=31536000; SameSite=Lax`;
+  }
+  if (!themeToggle || !themeLabel) return;
+  const dark = theme === "dark";
+  themeToggle.setAttribute("aria-pressed", String(dark));
+  themeToggle.setAttribute("aria-label", `Switch to ${dark ? "light" : "dark"} mode`);
+  themeToggle.title = `Switch to ${dark ? "light" : "dark"} mode`;
+  themeLabel.textContent = dark ? "Light" : "Dark";
+}
+
+if (themeToggle) {
+  applyTheme(document.documentElement.dataset.theme || "light");
+  themeToggle.addEventListener("click", () => {
+    applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true);
+  });
+  colorScheme.addEventListener("change", (event) => {
+    if (!storedTheme()) applyTheme(event.matches ? "dark" : "light");
+  });
+}
+
 document.querySelectorAll("[data-instruction]").forEach((button) => {
   button.addEventListener("click", () => {
     const field = document.querySelector("#instruction");
