@@ -16,9 +16,12 @@ const profileSelect = document.querySelector("[data-profile-select]");
 function filterProfiles() {
   if (!providerSelect || !profileSelect) return;
   const providerId = providerSelect.value;
+  const providerKind = providerSelect.selectedOptions[0]?.dataset.kind || "";
   let firstVisible = null;
   Array.from(profileSelect.options).forEach((option) => {
-    const visible = option.dataset.provider === providerId;
+    const visible =
+      option.dataset.provider === providerId ||
+      (!option.dataset.provider && option.dataset.kind === providerKind);
     option.hidden = !visible;
     option.disabled = !visible;
     if (visible && !firstVisible) firstVisible = option;
@@ -26,6 +29,9 @@ function filterProfiles() {
   if (!profileSelect.selectedOptions[0] || profileSelect.selectedOptions[0].disabled) {
     profileSelect.value = firstVisible ? firstVisible.value : "";
   }
+  document.querySelectorAll("[data-default-kind]").forEach((card) => {
+    card.hidden = card.dataset.defaultKind !== providerKind;
+  });
 }
 
 if (providerSelect && profileSelect) {

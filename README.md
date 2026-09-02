@@ -85,13 +85,19 @@ PYTHONPATH=src python -m narranova web --data-dir ./data
 
 Open `http://127.0.0.1:8787`. The web interface supports EPUB upload, library
 and narration-plan review, per-section narration inclusion, a dedicated TTS
-connections page, and a book-independent Voice Lab for comparing short
-OpenMOSS auditions. Voice Lab can begin from narration direction alone or from
-an uploaded, saved, or generated reference. Users can regenerate takes, promote
-a chosen take into a named reusable profile, and then select both the connection
-and voice profile on the separate narration setup page. Connections and profiles
-can be edited, renamed, or deleted. Saving a profile removes its discarded draft
-audio. The interface also supports durable job creation,
+connections page, nine packaged OpenMOSS narrator pairs, and a book-independent
+Voice Lab for comparing short custom auditions. The built-in pairs include their
+exact instruction, reference text, and WAV; users can preview them in the voice
+library and select one directly when creating a narration job. Voice Lab first
+creates reference candidates from narration
+direction alone or an optional uploaded/generated source, then pairs the chosen
+reference with final instructions as a named reusable profile. Existing profiles
+are not offered as the new profile's final pair. Connections and profiles can be
+edited, renamed, or deleted. Each generation job owns an immutable voice snapshot
+and copied reference WAV. Profiles used by unfinished jobs are visibly marked and
+protected from deletion until those jobs complete or are deleted; deleting the
+profile afterward removes its own files without breaking completed jobs. Saving a
+profile removes its discarded draft audio. The interface also supports durable job creation,
 background generation, pause/resume, status, and verified chunk playback.
 Saving section choices creates an immutable plan revision; existing jobs retain
 their original plan and new jobs use the latest revision. The server binds to

@@ -16,6 +16,10 @@ from tempfile import NamedTemporaryFile
 from typing import Callable, Iterable
 from urllib.parse import parse_qs, quote, unquote
 
+from narranova.application.default_voices import (
+    default_voice_pair,
+    default_voice_pairs,
+)
 from narranova.application.deletion import DeleteArtifacts
 from narranova.application.generation import GenerationJobs, VoiceProfiles
 from narranova.application.ingest import ImportBook
@@ -98,6 +102,7 @@ class NarranovaWebApp:
         self.jobs = jobs
         self.deletion = deletion
         self.voice_studio = voice_studio
+        self.default_voices = default_voice_pairs()
         self.supervisor = JobSupervisor(jobs)
 
     def __call__(self, environ: dict[str, object], start_response: StartResponse) -> Iterable[bytes]:
@@ -125,6 +130,13 @@ class NarranovaWebApp:
                 return self._html(start_response, self._connections(environ, csrf), set_cookie)
             if method == "GET" and parts == ["voices"]:
                 return self._html(start_response, self._voices(environ, csrf), set_cookie)
+            if (
+                method == "GET"
+                and len(parts) == 3
+                and parts[0] == "default-voices"
+                and parts[2] == "audio"
+            ):
+                return self._default_voice_audio(start_response, parts[1])
             if method == "GET" and len(parts) == 3 and parts[0] == "connections" and parts[2] == "edit":
                 return self._html(
                     start_response,
@@ -162,7 +174,7 @@ class NarranovaWebApp:
                         csrf,
                         title="Delete voice profile",
                         subject=str(voice["profile"].get("name") or "Untitled voice"),
-                        warning="This permanently deletes the saved instruction and reference audio. Generation jobs using it must be deleted first.",
+                        warning="This permanently deletes the saved instruction and reference audio. Existing generation jobs keep their own independent voice snapshot.",
                         action=f"/voices/{self._e(parts[1])}/delete",
                         cancel="/voices",
                         button="Delete voice profile",
@@ -455,12 +467,16 @@ class NarranovaWebApp:
 
     def _voices(self, environ: dict[str, object], csrf: str) -> str:
         profiles = self.generation.list_voice_profiles()
+        builtin_cards = "".join(
+            f"""<article class="builtin-voice-card"><div class="builtin-voice-head"><span>{self._e(pair.id)}</span><div><h3>{self._e(pair.name)}</h3><p>{self._e(pair.gender)} · Built-in OpenMOSS pair</p></div><b>Built in</b></div><audio controls preload="none" src="/default-voices/{self._e(pair.id)}/audio"></audio><details><summary>Narration instruction</summary><p>{self._e(pair.instruction)}</p><small>Reference text: {self._e(pair.sample_text)}</small></details></article>"""
+            for pair in self.default_voices
+        )
         profile_cards = "".join(
-            f"""<article class="voice-card"><header><span class="voice-avatar">{self._e(profile.name[:1].upper())}</span><div><h3>{self._e(profile.name)}</h3><p>{self._e(profile.provider_name)} · {self._e(provider_type(profile.provider_kind).label)}</p></div><div class="card-actions"><a href="/voices/{self._e(profile.id)}/edit">Edit</a><a class="danger-link" href="/voices/{self._e(profile.id)}/delete">Delete</a></div></header><blockquote>{self._e(profile.profile.get('instruction', ''))}</blockquote><audio controls preload="none" src="/voices/{self._e(profile.id)}/reference/audio"></audio></article>"""
+            f"""<article class="voice-card"><header><span class="voice-avatar">{self._e(profile.name[:1].upper())}</span><div><div class="voice-title-line"><h3>{self._e(profile.name)}</h3>{f'<span class="in-use-badge">In use · {profile.in_use_job_count}</span>' if profile.in_use_job_count else ''}</div><p>{self._e(profile.provider_name)} · {self._e(provider_type(profile.provider_kind).label)}</p></div><div class="card-actions"><a href="/voices/{self._e(profile.id)}/edit">Edit</a>{f'<span class="disabled-action" title="Complete or delete the generation job first">Delete</span>' if profile.in_use_job_count else f'<a class="danger-link" href="/voices/{self._e(profile.id)}/delete">Delete</a>'}</div></header><blockquote>{self._e(profile.profile.get('instruction', ''))}</blockquote><audio controls preload="none" src="/voices/{self._e(profile.id)}/reference/audio"></audio></article>"""
             for profile in profiles
         ) or """<div class="empty-state"><span>V</span><h3>No saved voices</h3><p>Create an audition workspace to find your first reference and instruction pair.</p></div>"""
         start = f"""<form method="post" action="/voices/drafts">{self._csrf(csrf)}<button class="primary">Open Voice Lab</button></form>"""
-        body = f"""<section class="page-heading"><div><p class="eyebrow">Voice profiles</p><h1>Find a voice worth keeping</h1><p>Build reusable narrator profiles independently, then apply them to any compatible book and connection.</p></div></section><div class="voice-library-grid"><main><div class="section-heading"><div><h2>Saved profiles</h2><p>{len(profiles)} ready for narration</p></div></div><div class="voice-list">{profile_cards}</div></main><aside class="panel start-studio"><div class="studio-glyph">♪</div><p class="eyebrow">Voice Lab</p><h2>Start an audition</h2><p>Begin with direction alone, or add reference audio whenever it helps. Regenerate until the voice feels right.</p>{start}</aside></div>"""
+        body = f"""<section class="page-heading"><div><p class="eyebrow">Narrator pairs</p><h1>Choose a voice or build your own</h1><p>Built-in pairs are ready for any OpenMOSS connection. Custom profiles remain yours to edit and reuse.</p></div></section><section class="builtin-library"><div class="section-heading"><div><p class="eyebrow">Included with Narranova</p><h2>Built-in narrator pairs</h2><p>Preview the reference audio and its matching instruction.</p></div><span class="count">{len(self.default_voices):02d}</span></div><div class="builtin-voice-grid">{builtin_cards}</div></section><div class="voice-library-grid"><main><div class="section-heading"><div><h2>Your profiles</h2><p>{len(profiles)} custom profiles ready for narration</p></div></div><div class="voice-list">{profile_cards}</div></main><aside class="panel start-studio"><div class="studio-glyph">♪</div><p class="eyebrow">Voice Lab</p><h2>Build a custom pair</h2><p>Create reference audio, pair it with precise narration instructions, and save it for any book.</p>{start}</aside></div>"""
         return self._layout("Voices", body, environ)
 
     def _edit_voice(self, profile_id: str, environ: dict[str, object], csrf: str) -> str:
@@ -489,7 +505,6 @@ class NarranovaWebApp:
     def _voice_studio(self, draft_id: str, environ: dict[str, object], csrf: str) -> str:
         draft = self.voice_studio.get(draft_id)
         providers = [item for item in self.generation.list_providers() if item.enabled]
-        profiles = self.generation.list_voice_profiles()
         selected_provider = str(draft.get("provider_id") or "")
         provider_options = "".join(
             f'<option value="{self._e(item.id)}" data-instructions="{str(provider_type(item.kind).supports_instructions).lower()}" data-reference="{str(provider_type(item.kind).supports_reference_audio).lower()}"{" selected" if item.id == selected_provider else ""}>{self._e(item.name)} · {self._e(provider_type(item.kind).label)}</option>'
@@ -499,31 +514,23 @@ class NarranovaWebApp:
             f'<button type="button" class="prompt-chip" data-instruction="{self._e(instruction)}"><strong>{self._e(name)}</strong><span>{self._e(instruction)}</span></button>'
             for name, instruction in INSTRUCTION_PRESETS
         )
-        reference_options = ['<option value="none">No reference — instruction only</option>']
+        reference_options = ['<option value="none">No source reference — instruction only</option>']
         if draft.get("uploaded_reference_path"):
             reference_options.append('<option value="uploaded">Uploaded reference WAV</option>')
         reference_options.extend(
-            f'<option value="profile:{self._e(profile.id)}">Saved profile · {self._e(profile.name)}</option>'
-            for profile in profiles
-        )
-        reference_options.extend(
-            f'<option value="take:{self._e(take["id"])}">Audition take · {len(draft["takes"]) - index:02d}</option>'
+            f'<option value="take:{self._e(take["id"])}">Generated candidate · {len(draft["takes"]) - index:02d}</option>'
             for index, take in enumerate(reversed(draft["takes"]))
         )
         takes = "".join(
-            f"""<article class="take-card"><div class="take-index">{len(draft['takes']) - index:02d}</div><div class="take-main"><div><strong>Audition take</strong><span>{float(take['duration_seconds']):.1f} seconds</span></div><audio controls preload="none" src="/voices/drafts/{self._e(draft_id)}/takes/{self._e(take['id'])}/audio"></audio><details><summary>Direction used</summary><p>{self._e(take['instruction'])}</p></details></div></article>"""
+            f"""<article class="take-card"><div class="take-index">{len(draft['takes']) - index:02d}</div><div class="take-main"><div><strong>Reference candidate</strong><span>{float(take['duration_seconds']):.1f} seconds</span></div><audio controls preload="none" src="/voices/drafts/{self._e(draft_id)}/takes/{self._e(take['id'])}/audio"></audio><details><summary>Instruction used</summary><p>{self._e(take['instruction'])}</p></details></div></article>"""
             for index, take in enumerate(reversed(draft["takes"]))
-        ) or '<div class="empty-state compact"><span>♪</span><h3>Your auditions will appear here</h3><p>Start with direction alone, or add a clean speech reference when you want stronger voice matching.</p></div>'
+        ) or '<div class="empty-state compact"><span>♪</span><h3>Your reference candidates will appear here</h3><p>Generate from the instruction alone, or provide a clean source sample to guide the voice.</p></div>'
         save_references: list[str] = []
         if draft.get("uploaded_reference_path"):
             save_references.append('<label class="reference-radio"><input type="radio" name="reference_choice" value="uploaded"><span><strong>Uploaded WAV</strong><small>Keep the original reference</small></span></label>')
         save_references.extend(
             f'<label class="reference-radio"><input type="radio" name="reference_choice" value="take:{self._e(take["id"])}"{" checked" if index == 0 else ""}><span><strong>Audition take {len(draft["takes"]) - index:02d}</strong><small>{float(take["duration_seconds"]):.1f}s generated sample</small></span></label>'
             for index, take in enumerate(reversed(draft["takes"]))
-        )
-        save_references.extend(
-            f'<label class="reference-radio"><input type="radio" name="reference_choice" value="profile:{self._e(profile.id)}"><span><strong>{self._e(profile.name)}</strong><small>Existing saved reference</small></span></label>'
-            for profile in profiles
         )
         can_audition = bool(providers)
         can_save = bool(save_references and providers)
@@ -532,13 +539,13 @@ class NarranovaWebApp:
             if can_audition
             else '<div class="studio-warning"><strong>Connection needed</strong><span>Add OpenMOSS before generating your first take.</span><a href="/connections">Set up connection →</a></div>'
         )
-        audition_form = f"""<form class="audition-form" method="post" action="/voices/drafts/{self._e(draft_id)}/auditions" enctype="multipart/form-data">{self._csrf(csrf)}{connection_warning}<div class="form-row"><label>Connection<select name="provider_id" data-studio-provider required><option value="">Choose a connection</option>{provider_options}</select></label><label>Language<input name="language" value="{self._e(draft.get('language', 'English'))}"></label></div><fieldset data-studio-module="instructions"><legend>1. Choose a direction</legend><p class="field-help">Start with an example, then make it your own. Specific pacing and emotional guidance works best.</p><div class="prompt-grid">{preset_buttons}</div><label for="instruction">Your narration instruction<textarea id="instruction" name="instruction" rows="5" required>{self._e(draft.get('instruction', ''))}</textarea></label></fieldset><fieldset data-studio-module="reference"><legend>2. Reference audio <span class="optional-label">Optional</span></legend><p class="field-help">Generate from direction alone, select an existing reference, or upload a clean WAV. An upload takes priority.</p><label>Starting reference<select name="reference_choice">{''.join(reference_options)}</select></label><label class="file-drop">Upload a reference WAV<input type="file" name="reference" accept="audio/wav,.wav"><span>Optional · choose a short, clean speech sample</span></label></fieldset><fieldset><legend>3. Read the test lines</legend><p class="field-help">Edit these if you need to test names, dialogue, punctuation, or a particular mood.</p><label for="sample_text">Audition text<textarea id="sample_text" name="sample_text" rows="5" maxlength="2000" required>{self._e(draft.get('sample_text', ''))}</textarea></label></fieldset><input type="hidden" name="name" value="{self._e(draft.get('name', ''))}"><button class="primary wide-button"{"" if can_audition else " disabled"}>Generate new audition</button></form>"""
+        audition_form = f"""<form class="audition-form" method="post" action="/voices/drafts/{self._e(draft_id)}/auditions" enctype="multipart/form-data">{self._csrf(csrf)}<div class="phase-title"><span>Step 1</span><div><h2>Create the reference audio</h2><p>Shape a short, repeatable voice sample before saving a reusable profile.</p></div></div>{connection_warning}<div class="form-row"><label>Connection<select name="provider_id" data-studio-provider required><option value="">Choose a connection</option>{provider_options}</select></label><label>Language<input name="language" value="{self._e(draft.get('language', 'English'))}"></label></div><fieldset data-studio-module="instructions"><legend>Narration instruction</legend><p class="field-help">Start with an example, then make it your own. Specific pacing and emotional guidance works best.</p><div class="prompt-grid">{preset_buttons}</div><label for="instruction">Instruction for the candidate<textarea id="instruction" name="instruction" rows="5" required>{self._e(draft.get('instruction', ''))}</textarea></label></fieldset><fieldset><legend>Short test passage</legend><p class="field-help">Edit these lines to test names, dialogue, punctuation, or a particular mood.</p><label for="sample_text">Text to generate<textarea id="sample_text" name="sample_text" rows="5" maxlength="2000" required>{self._e(draft.get('sample_text', ''))}</textarea></label></fieldset><fieldset data-studio-module="reference"><legend>Optional source sample</legend><p class="field-help">Leave this empty to create a candidate from instruction alone. You can also guide it with an uploaded WAV or an earlier candidate.</p><label>Source reference<select name="reference_choice">{''.join(reference_options)}</select></label><label class="file-drop">Upload a source WAV<input type="file" name="reference" accept="audio/wav,.wav"><span>Optional · short, clean speech works best</span></label></fieldset><input type="hidden" name="name" value="{self._e(draft.get('name', ''))}"><button class="primary wide-button"{"" if can_audition else " disabled"}>Generate reference candidate</button></form>"""
         save_form = (
-            f"""<form method="post" action="/voices/drafts/{self._e(draft_id)}/save">{self._csrf(csrf)}<input type="hidden" name="provider_id" value="{self._e(selected_provider or (providers[0].id if providers else ''))}"><label>Profile name<input name="name" value="{self._e(draft.get('name', ''))}" placeholder="Warm literary narrator" required></label><label>Final instruction<textarea name="instruction" rows="5" required>{self._e(draft.get('instruction', ''))}</textarea></label><label>Language<input name="language" value="{self._e(draft.get('language', 'English'))}"></label><fieldset class="reference-list"><legend>Reference to keep</legend>{''.join(save_references)}</fieldset><button class="primary wide-button">Save voice profile</button><p class="cleanup-note">Saving keeps only this pair. Other audition audio and draft files are deleted automatically.</p></form>"""
+            f"""<form method="post" action="/voices/drafts/{self._e(draft_id)}/save">{self._csrf(csrf)}<input type="hidden" name="provider_id" value="{self._e(selected_provider or (providers[0].id if providers else ''))}"><label>Profile name<input name="name" value="{self._e(draft.get('name', ''))}" placeholder="Warm literary narrator" required></label><fieldset class="reference-list"><legend>Reference audio</legend><p class="field-help">Choose only from audio created or uploaded in this draft.</p>{''.join(save_references)}</fieldset><label>Instruction to pair with it<textarea name="instruction" rows="5" required>{self._e(draft.get('instruction', ''))}</textarea></label><label>Language<input name="language" value="{self._e(draft.get('language', 'English'))}"></label><button class="primary wide-button">Save instruction + reference profile</button><p class="cleanup-note">Saving keeps the selected pair. Other candidate audio and draft files are deleted automatically.</p></form>"""
             if can_save
-            else '<div class="empty-state compact"><h3>Choose a reference first</h3><p>Upload a WAV or generate an audition before saving the profile.</p></div>'
+            else '<div class="empty-state compact"><h3>Complete step 1 first</h3><p>Upload a WAV or generate a reference candidate before pairing and saving.</p></div>'
         )
-        body = f"""<a class="back" href="/voices">← Voice profiles</a><section class="studio-heading"><div><p class="eyebrow">Voice Lab</p><h1>Shape the narrator</h1><p>Generate as many short auditions as you need. Profiles are reusable and are not linked to a book.</p></div><form method="post" action="/voices/drafts/{self._e(draft_id)}/discard">{self._csrf(csrf)}<button class="quiet-danger">Discard draft</button></form></section><div class="studio-grid"><main class="panel studio-builder">{audition_form}</main><aside class="studio-results"><section><div class="section-heading"><div><p class="eyebrow">Listen back</p><h2>Audition takes</h2></div><span class="count">{len(draft['takes']):02d}</span></div><div class="take-list">{takes}</div></section><section class="panel save-profile"><header><div><p class="eyebrow">Approved pair</p><h2>Save this voice</h2></div></header>{save_form}</section></aside></div>"""
+        body = f"""<a class="back" href="/voices">← Voice profiles</a><section class="studio-heading"><div><p class="eyebrow">Voice Lab</p><h1>Build a stable narrator</h1><p>First create the voice reference. Then pair it with precise instructions for consistent book-length narration.</p></div><form method="post" action="/voices/drafts/{self._e(draft_id)}/discard">{self._csrf(csrf)}<button class="quiet-danger">Discard draft</button></form></section><ol class="lab-progress"><li class="active"><span>1</span><div><strong>Create reference</strong><small>Generate and review short candidates</small></div></li><li class="{'active' if can_save else ''}"><span>2</span><div><strong>Pair and save</strong><small>Lock reference audio with instructions</small></div></li></ol><div class="studio-grid"><main class="panel studio-builder">{audition_form}</main><aside class="studio-results"><section><div class="section-heading"><div><p class="eyebrow">Step 1 results</p><h2>Reference candidates</h2></div><span class="count">{len(draft['takes']):02d}</span></div><div class="take-list">{takes}</div></section><section class="panel save-profile"><header><div><p class="eyebrow">Step 2</p><h2>Pair and save the profile</h2></div></header>{save_form}</section></aside></div>"""
         return self._layout("Voice Lab", body, environ)
 
     def _new_narration(self, book_id: str, environ: dict[str, object], csrf: str) -> str:
@@ -556,22 +563,36 @@ class NarranovaWebApp:
             if item.provider_id in provider_ids
         ]
         preferred_provider_id = profiles[0].provider_id if profiles else ""
+        if not preferred_provider_id and providers:
+            preferred_provider_id = providers[0].id
         enabled_units = sum(unit.enabled for unit in plan.units)
         provider_options = "".join(
-            f'<option value="{self._e(item.id)}"{" selected" if item.id == preferred_provider_id else ""}>{self._e(item.name)}</option>'
+            f'<option value="{self._e(item.id)}" data-kind="{self._e(item.kind)}"{" selected" if item.id == preferred_provider_id else ""}>{self._e(item.name)}</option>'
             for item in providers
         )
         profile_options = "".join(
-            f'<option value="{self._e(item.id)}" data-provider="{self._e(item.provider_id)}">{self._e(item.name)} · {self._e(item.provider_name)}</option>'
+            f'<option value="{self._e(item.id)}" data-provider="{self._e(item.provider_id)}" data-kind="{self._e(item.provider_kind)}">Custom · {self._e(item.name)}</option>'
             for item in profiles
         )
-        if providers and profiles:
-            setup = f"""<form class="narration-form" method="post" action="/books/{self._e(book_id)}/jobs">{self._csrf(csrf)}<label>TTS connection<small>The service that will generate every chunk.</small><select name="provider_id" data-provider-select required>{provider_options}</select></label><label>Voice profile<small>The approved narrator settings for this connection.</small><select name="voice_profile_id" data-profile-select required>{profile_options}</select></label><div class="selection-note"><span>✓</span><p>The selected profile's direction and provider-specific voice settings will be used for each chunk.</p></div><button class="primary wide-button">Create narration job</button></form>"""
+        builtin_options = "".join(
+            f'<option value="{self._e(pair.selector_id)}" data-kind="{self._e(pair.provider_kind)}">Built in · {self._e(pair.name)}</option>'
+            for pair in self.default_voices
+        )
+        compatible_builtin = any(
+            pair.provider_kind in {provider.kind for provider in providers}
+            for pair in self.default_voices
+        )
+        builtin_previews = "".join(
+            f"""<article data-default-kind="{self._e(pair.provider_kind)}"><div><span>{self._e(pair.id)}</span><strong>{self._e(pair.name)}</strong><small>{self._e(pair.gender)}</small></div><audio controls preload="none" src="/default-voices/{self._e(pair.id)}/audio"></audio><p>{self._e(pair.instruction)}</p></article>"""
+            for pair in self.default_voices
+        )
+        if providers and (profiles or compatible_builtin):
+            setup = f"""<form class="narration-form" method="post" action="/books/{self._e(book_id)}/jobs">{self._csrf(csrf)}<label>TTS connection<small>The service that will generate every chunk.</small><select name="provider_id" data-provider-select required>{provider_options}</select></label><label>Narrator pair<small>Choose an included pair or one of your custom profiles.</small><select name="voice_profile_id" data-profile-select required>{builtin_options}{profile_options}</select></label><details class="builtin-preview"><summary>Listen to built-in pairs</summary><div>{builtin_previews}</div></details><div class="selection-note"><span>✓</span><p>The selected pair's reference audio and matching instruction will be copied into this job.</p></div><button class="primary wide-button">Create narration job</button></form>"""
         else:
             needs = []
             if not providers:
                 needs.append('<a class="setup-missing" href="/connections"><span>01</span><div><strong>Add a TTS connection</strong><small>Connect your external OpenMOSS service.</small></div><b>→</b></a>')
-            if not profiles:
+            if not profiles and not compatible_builtin:
                 needs.append(f'<form method="post" action="/voices/drafts" class="setup-missing">{self._csrf(csrf)}<span>02</span><div><strong>Create a voice profile</strong><small>Audition a reusable instruction and reference pair.</small></div><button aria-label="Open Voice Lab">→</button></form>')
             setup = f'<div class="missing-stack">{"".join(needs)}</div>'
         jobs = self.generation.list_jobs(book_id)
@@ -675,6 +696,19 @@ class NarranovaWebApp:
         if self.store.sha256(path) != profile["reference_sha256"]:
             raise RuntimeError("Voice reference failed hash validation")
         return self._respond(start_response, "200 OK", path.read_bytes(), "audio/wav")
+
+    def _default_voice_audio(
+        self,
+        start_response: StartResponse,
+        voice_id: str,
+    ) -> Iterable[bytes]:
+        pair = default_voice_pair(f"builtin:{voice_id}")
+        validate_wave(pair.audio_path)
+        if self.store.sha256(pair.audio_path) != pair.audio_sha256:
+            raise RuntimeError("Built-in narrator audio failed hash validation")
+        return self._respond(
+            start_response, "200 OK", pair.audio_path.read_bytes(), "audio/wav"
+        )
 
     def _layout(self, title: str, body: str, environ: dict[str, object], refresh: bool = False) -> str:
         query = parse_qs(str(environ.get("QUERY_STRING", "")))
@@ -804,8 +838,8 @@ def create_web_app(data_dir: str | Path | None = None) -> NarranovaWebApp:
     books = BookRepository(database)
     generation = GenerationRepository(database)
     store = ArtifactStore(settings.data_dir)
-    jobs = GenerationJobs(books, generation, layout, store)
     profiles = VoiceProfiles(generation, layout, store)
+    jobs = GenerationJobs(books, generation, layout, store)
     return NarranovaWebApp(
         settings,
         books,

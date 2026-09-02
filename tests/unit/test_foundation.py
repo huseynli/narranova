@@ -9,11 +9,12 @@ import wave
 from importlib.resources import files
 from pathlib import Path
 
-from narranova.application.generation import VoiceProfiles
+from narranova.application.generation import GenerationJobs, VoiceProfiles
 from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.cli.main import main
 from narranova.config import Settings
 from narranova.persistence import Database
+from narranova.persistence.books import BookRepository
 from narranova.persistence.generation import GenerationRepository
 from narranova.providers import ProviderCapabilities, SynthesisRequest
 
@@ -116,14 +117,21 @@ class DatabaseTests(unittest.TestCase):
             database = Database(path)
             database.initialize()
             repository = GenerationRepository(database)
-            VoiceProfiles(repository, layout, ArtifactStore(data))
+            store = ArtifactStore(data)
+            VoiceProfiles(repository, layout, store)
+            GenerationJobs(BookRepository(database), repository, layout, store)
 
             migrated = repository.get_voice_and_provider("voice")
             migrated_reference = data / migrated["profile"]["reference_artifact_path"]
-            self.assertEqual(repository.get_job("job")["narrator_profile_id"], "voice")
+            migrated_job = repository.get_job("job")
+            job_reference = data / migrated_job["profile"]["reference_artifact_path"]
+            self.assertEqual(migrated_job["narrator_profile_id"], "voice")
+            self.assertEqual(migrated_job["provider_instance_id"], "provider")
             self.assertEqual(migrated["profile"]["name"], "Legacy narrator")
             self.assertTrue(migrated_reference.is_file())
             self.assertTrue(migrated_reference.is_relative_to(layout.voices_root))
+            self.assertTrue(job_reference.is_file())
+            self.assertTrue(job_reference.is_relative_to(layout.job_root("book", "job")))
             self.assertFalse(old_reference.exists())
 
     def test_initialization_is_idempotent_and_applies_schema(self) -> None:
@@ -151,6 +159,7 @@ class DatabaseTests(unittest.TestCase):
                     (1, "initial"),
                     (2, "generation_jobs"),
                     (3, "global_narrator_profiles"),
+                    (4, "self_contained_job_voices"),
                 ],
             )
             self.assertTrue(

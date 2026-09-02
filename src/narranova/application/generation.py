@@ -9,6 +9,10 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
+from narranova.application.default_voices import (
+    BUILTIN_VOICE_PREFIX,
+    default_voice_pair,
+)
 from narranova.application.planning import ChunkPlanner
 from narranova.application.provider_catalog import provider_type
 from narranova.artifacts import ArtifactLayout, ArtifactStore
@@ -162,8 +166,8 @@ class VoiceProfiles:
             if created_reference is not None:
                 created_reference.unlink(missing_ok=True)
             raise
-        # Keep earlier approved references because existing generation jobs store
-        # immutable profile snapshots that may still point to those WAV files.
+        if created_reference is not None and old_reference != created_reference:
+            old_reference.unlink(missing_ok=True)
 
     def _migrate_legacy_artifacts(self) -> None:
         for stored in self.repository.list_voice_profiles():
@@ -221,6 +225,7 @@ class GenerationJobs:
         self.layout = layout
         self.store = store
         self.provider_factory = provider_factory or self._openmoss_provider
+        self._materialize_job_voice_references()
 
     def create(
         self,
@@ -228,9 +233,35 @@ class GenerationJobs:
         voice_profile_id: str,
         provider_id: str | None = None,
     ) -> str:
-        voice = self.generation.get_voice_and_provider(voice_profile_id)
-        if provider_id is not None and voice["provider_id"] != provider_id:
-            raise ValueError("Voice profile does not belong to the selected TTS connection")
+        narrator_profile_id: str | None = voice_profile_id
+        if voice_profile_id.startswith(BUILTIN_VOICE_PREFIX):
+            if not provider_id:
+                raise ValueError("Choose a TTS connection for the built-in narrator")
+            provider = self.generation.get_provider(provider_id)
+            pair = default_voice_pair(voice_profile_id)
+            if provider["kind"] != pair.provider_kind:
+                raise ValueError("Built-in narrator is not compatible with this connection")
+            voice = {
+                "provider_id": provider["id"],
+                "provider_kind": provider["kind"],
+                "enabled": provider["enabled"],
+                "profile": pair.profile_snapshot(),
+            }
+            source_reference = pair.audio_path
+            expected_reference_hash = pair.audio_sha256
+            narrator_profile_id = None
+        else:
+            voice = self.generation.get_voice_and_provider(voice_profile_id)
+            if provider_id is not None and voice["provider_id"] != provider_id:
+                raise ValueError(
+                    "Voice profile does not belong to the selected TTS connection"
+                )
+            source_reference = self._artifact_path(
+                voice["profile"]["reference_artifact_path"]
+            )
+            expected_reference_hash = voice["profile"]["reference_sha256"]
+        if not voice["enabled"]:
+            raise ValueError("The selected TTS connection is disabled")
         plan_record = self.books.get_plan_record(book_id)
         plan_path = self._artifact_path(plan_record["artifact_path"])
         if self.store.sha256(plan_path) != plan_record["plan_sha256"]:
@@ -240,8 +271,21 @@ class GenerationJobs:
         if not chunks:
             raise ValueError("Narration plan has no enabled text")
         job_id = uuid.uuid4().hex
+        profile = dict(voice["profile"])
         records = []
         try:
+            validate_wave(source_reference)
+            if self.store.sha256(source_reference) != expected_reference_hash:
+                raise RuntimeError("Voice reference failed hash validation")
+            job_reference = self.layout.job_voice_reference(book_id, job_id)
+            reference_hash = self.store.copy(source_reference, job_reference)
+            profile["reference_artifact_path"] = job_reference.relative_to(
+                self.layout.root
+            ).as_posix()
+            profile["reference_sha256"] = reference_hash
+            profile_hash = hashlib.sha256(
+                _canonical_json(profile).encode("utf-8")
+            ).hexdigest()
             for chunk in chunks:
                 path = self.layout.job_chunk_text(book_id, job_id, chunk.id)
                 chunk_hash = self.store.write_text(path, chunk.text)
@@ -252,7 +296,10 @@ class GenerationJobs:
                 job_id=job_id,
                 book_id=book_id,
                 plan_id=plan_record["id"],
-                voice_profile_id=voice_profile_id,
+                voice_profile_id=narrator_profile_id,
+                provider_id=voice["provider_id"],
+                profile_snapshot=profile,
+                profile_snapshot_sha256=profile_hash,
                 chunks=records,
             )
         except Exception:
@@ -315,6 +362,52 @@ class GenerationJobs:
         if not path.is_relative_to(self.layout.root):
             raise RuntimeError("Stored artifact path escapes the data directory")
         return path
+
+    def _materialize_job_voice_references(self) -> None:
+        """Move legacy job snapshots onto job-owned, independently deletable WAVs."""
+        for job in self.generation.list_job_voice_snapshots():
+            profile = dict(job["profile"])
+            relative = profile.get("reference_artifact_path")
+            expected_hash = profile.get("reference_sha256")
+            if not relative or not expected_hash:
+                continue
+            destination = self.layout.job_voice_reference(job["book_id"], job["id"])
+            stored_path = self._artifact_path(str(relative))
+            if stored_path == destination and self._valid_reference(
+                destination, str(expected_hash)
+            ):
+                continue
+            candidates = [stored_path]
+            current = job.get("current_profile") or {}
+            current_relative = current.get("reference_artifact_path")
+            if current_relative:
+                candidates.append(self._artifact_path(str(current_relative)))
+            source = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if self._valid_reference(candidate, str(expected_hash))
+                ),
+                None,
+            )
+            if source is None:
+                continue
+            copied_hash = self.store.copy(source, destination)
+            profile["reference_artifact_path"] = destination.relative_to(
+                self.layout.root
+            ).as_posix()
+            profile["reference_sha256"] = copied_hash
+            snapshot_hash = hashlib.sha256(
+                _canonical_json(profile).encode("utf-8")
+            ).hexdigest()
+            self.generation.update_job_voice_snapshot(job["id"], profile, snapshot_hash)
+
+    def _valid_reference(self, path: Path, expected_hash: str) -> bool:
+        try:
+            validate_wave(path)
+            return self.store.sha256(path) == expected_hash
+        except (OSError, ValueError):
+            return False
 
     def _reuse_verified_chunks(self, book_id: str, job_id: str) -> None:
         for chunk in self.generation.list_chunks(job_id):

@@ -83,7 +83,12 @@ def build_parser() -> argparse.ArgumentParser:
         "job-create", help="create a durable generation job"
     )
     create_job_parser.add_argument("book_id")
-    create_job_parser.add_argument("voice_profile_id")
+    create_job_parser.add_argument(
+        "voice_profile_id", help="saved profile ID or built-in selector such as builtin:01"
+    )
+    create_job_parser.add_argument(
+        "--provider-id", help="required for a built-in narrator pair"
+    )
     create_job_parser.add_argument("--data-dir", help="persistent data directory")
 
     run_job_parser = commands.add_parser("job-run", help="run or resume a generation job")
@@ -177,7 +182,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             ArtifactStore(settings.data_dir),
         )
         if args.command == "job-create":
-            job_id = jobs.create(args.book_id, args.voice_profile_id)
+            job_id = jobs.create(
+                args.book_id, args.voice_profile_id, args.provider_id
+            )
             print(f"Created generation job {job_id}")
             return 0
         if args.command == "job-run":

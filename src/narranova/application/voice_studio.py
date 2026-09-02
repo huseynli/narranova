@@ -198,6 +198,12 @@ class VoiceStudio:
         provider = self.generation.get_provider(provider_id)
         if not provider["enabled"]:
             raise ValueError("The selected TTS connection is disabled")
+        if provider_type(str(provider["kind"])).id != "openmoss":
+            raise ValueError("Saving this provider's voice profiles is not implemented yet")
+        if reference_choice.startswith("profile:"):
+            raise ValueError(
+                "Choose a reference created or uploaded in this Voice Lab draft"
+            )
         reference = self._reference(draft, reference_choice, required=True)
         profile_id = self.profiles.create_openmoss_profile(
             provider_id=provider_id,

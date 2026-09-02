@@ -192,6 +192,17 @@ class WebAppTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             app = create_web_app(root / "data")
+            reference = root / "reference.wav"
+            make_wave(reference)
+            provider_id = app.profiles.add_openmoss_provider(
+                "Lab MOSS", "http://moss.test:8000/tts"
+            )
+            app.profiles.create_openmoss_profile(
+                provider_id=provider_id,
+                reference_audio=reference,
+                instruction="An existing narrator.",
+                name="Existing saved voice",
+            )
 
             status, _, connections = request(app, "/connections")
             self.assertEqual(status, "200 OK")
@@ -202,7 +213,14 @@ class WebAppTests(unittest.TestCase):
             _, headers, voices = request(app, "/voices")
             cookie = next(value for name, value in headers if name == "Set-Cookie")
             token = cookie.split(";", 1)[0].split("=", 1)[1]
-            self.assertIn(b"Find a voice worth keeping", voices)
+            self.assertIn(b"Choose a voice or build your own", voices)
+            self.assertIn(b"Built-in narrator pairs", voices)
+            self.assertIn(b"01 female", voices)
+
+            status, audio_headers, audio = request(app, "/default-voices/01/audio")
+            self.assertEqual(status, "200 OK")
+            self.assertIn(("Content-Type", "audio/wav"), audio_headers)
+            self.assertGreater(len(audio), 1_000_000)
 
             status, response_headers, _ = request(
                 app,
@@ -217,10 +235,14 @@ class WebAppTests(unittest.TestCase):
 
             status, _, studio = request(app, location)
             self.assertEqual(status, "200 OK")
-            self.assertIn(b"Shape the narrator", studio)
+            self.assertIn(b"Build a stable narrator", studio)
+            self.assertIn(b"Create the reference audio", studio)
+            self.assertIn(b"Pair and save the profile", studio)
             self.assertIn(b"Warm literary", studio)
             self.assertIn(b"The rain had stopped", studio)
-            self.assertIn(b"No reference", studio)
+            self.assertIn(b"No source reference", studio)
+            self.assertNotIn(b"Existing saved reference", studio)
+            self.assertNotIn(b"Existing saved voice", studio)
             self.assertNotIn(b'name="book_id"', studio)
 
     def test_connections_and_profiles_can_be_edited_and_deleted(self) -> None:
@@ -301,6 +323,42 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(status, "303 See Other")
             self.assertEqual(app.generation.list_voice_profiles(), [])
             self.assertEqual(app.generation.list_providers(), [])
+
+    def test_voice_profile_marks_unfinished_job_usage_until_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "book.epub"
+            reference = root / "reference.wav"
+            make_epub(source)
+            make_wave(reference)
+            app = create_web_app(root / "data")
+            imported = app.import_book.execute(source)
+            provider_id = app.profiles.add_openmoss_provider(
+                "Job MOSS", "http://moss.test:8000/tts"
+            )
+            profile_id = app.profiles.create_openmoss_profile(
+                provider_id=provider_id,
+                reference_audio=reference,
+                instruction="A stable narrator.",
+                name="Working voice",
+            )
+            job_id = app.jobs.create(imported.book_id, profile_id)
+
+            _, _, narration_page = request(
+                app, f"/books/{imported.book_id}/narrations/new"
+            )
+            self.assertIn(b'value="builtin:01"', narration_page)
+            self.assertIn(b"Listen to built-in pairs", narration_page)
+
+            _, _, in_use_page = request(app, "/voices")
+            self.assertIn(b"In use \xc2\xb7 1", in_use_page)
+            self.assertIn(b"Complete or delete the generation job first", in_use_page)
+            self.assertNotIn(f'/voices/{profile_id}/delete'.encode(), in_use_page)
+
+            app.generation.complete_job(job_id)
+            _, _, completed_page = request(app, "/voices")
+            self.assertNotIn(b"In use \xc2\xb7 1", completed_page)
+            self.assertIn(f'/voices/{profile_id}/delete'.encode(), completed_page)
 
 
 if __name__ == "__main__":

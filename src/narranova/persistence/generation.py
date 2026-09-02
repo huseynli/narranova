@@ -41,6 +41,7 @@ class StoredVoiceProfile:
     provider_kind: str
     name: str
     profile: dict[str, Any]
+    in_use_job_count: int
 
 
 @dataclass(frozen=True)
@@ -142,12 +143,18 @@ class GenerationRepository:
 
     def delete_provider(self, provider_id: str) -> None:
         with self.database.connect() as connection:
-            in_use = connection.execute(
+            profile_in_use = connection.execute(
                 "SELECT 1 FROM narrator_profiles WHERE provider_instance_id = ? LIMIT 1",
                 (provider_id,),
             ).fetchone()
-            if in_use:
-                raise ValueError("Delete profiles using this TTS connection first")
+            job_in_use = connection.execute(
+                "SELECT 1 FROM jobs WHERE provider_instance_id = ? LIMIT 1",
+                (provider_id,),
+            ).fetchone()
+            if profile_in_use or job_in_use:
+                raise ValueError(
+                    "Delete profiles and generation jobs using this TTS connection first"
+                )
             cursor = connection.execute(
                 "DELETE FROM provider_instances WHERE id = ?", (provider_id,)
             )
@@ -157,7 +164,12 @@ class GenerationRepository:
     def list_voice_profiles(self) -> list[StoredVoiceProfile]:
         query = """
             SELECT v.id, p.id AS provider_id, p.name AS provider_name,
-                   p.kind AS provider_kind, v.profile_json
+                   p.kind AS provider_kind, v.profile_json,
+                   (
+                       SELECT COUNT(*) FROM jobs j
+                       WHERE j.narrator_profile_id = v.id
+                         AND j.status != 'completed'
+                   ) AS in_use_job_count
             FROM narrator_profiles v
             JOIN provider_instances p ON p.id = v.provider_instance_id
             ORDER BY v.updated_at DESC, v.id DESC
@@ -175,6 +187,7 @@ class GenerationRepository:
                     provider_kind=row["provider_kind"],
                     name=str(profile.get("name") or "Untitled voice"),
                     profile=profile,
+                    in_use_job_count=int(row["in_use_job_count"]),
                 )
             )
         return profiles
@@ -263,10 +276,11 @@ class GenerationRepository:
                 """
                 SELECT v.id, v.profile_json, v.profile_sha256,
                        p.id AS provider_id, p.kind AS provider_kind,
-                       p.name AS provider_name, p.endpoint_url, p.configuration_json
+                       p.name AS provider_name, p.endpoint_url,
+                       p.configuration_json, p.enabled
                 FROM narrator_profiles v
                 JOIN provider_instances p ON p.id = v.provider_instance_id
-                WHERE v.id = ? AND p.enabled = 1
+                WHERE v.id = ?
                 """,
                 (profile_id,),
             ).fetchone()
@@ -306,11 +320,23 @@ class GenerationRepository:
     def delete_voice_profile(self, profile_id: str) -> None:
         with self.database.connect() as connection:
             in_use = connection.execute(
-                "SELECT 1 FROM jobs WHERE narrator_profile_id = ? LIMIT 1",
+                """
+                SELECT COUNT(*) AS count FROM jobs
+                WHERE narrator_profile_id = ? AND status != 'completed'
+                """,
                 (profile_id,),
             ).fetchone()
-            if in_use:
-                raise ValueError("Delete generation jobs using this voice profile first")
+            if in_use and int(in_use["count"]) > 0:
+                count = int(in_use["count"])
+                noun = "job" if count == 1 else "jobs"
+                raise ValueError(
+                    f"Voice profile is in use by {count} unfinished generation {noun}"
+                )
+            connection.execute(
+                "UPDATE jobs SET narrator_profile_id = NULL "
+                "WHERE narrator_profile_id = ?",
+                (profile_id,),
+            )
             cursor = connection.execute(
                 "DELETE FROM narrator_profiles WHERE id = ?", (profile_id,)
             )
@@ -323,7 +349,10 @@ class GenerationRepository:
         job_id: str,
         book_id: str,
         plan_id: str,
-        voice_profile_id: str,
+        voice_profile_id: str | None,
+        provider_id: str,
+        profile_snapshot: dict[str, Any],
+        profile_snapshot_sha256: str,
         chunks: list[tuple[SynthesisChunk, str, str]],
     ) -> None:
         with self.database.connect() as connection:
@@ -331,13 +360,21 @@ class GenerationRepository:
                 """
                 INSERT INTO jobs(
                     id, book_id, narration_plan_id, narrator_profile_id,
+                    provider_instance_id,
                     voice_profile_snapshot_json, voice_profile_snapshot_sha256,
                     status
                 )
-                SELECT ?, ?, ?, id, profile_json, profile_sha256, 'ready'
-                FROM narrator_profiles WHERE id = ?
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'ready')
                 """,
-                (job_id, book_id, plan_id, voice_profile_id),
+                (
+                    job_id,
+                    book_id,
+                    plan_id,
+                    voice_profile_id,
+                    provider_id,
+                    json.dumps(profile_snapshot, ensure_ascii=False, sort_keys=True),
+                    profile_snapshot_sha256,
+                ),
             )
             connection.executemany(
                 """
@@ -377,8 +414,9 @@ class GenerationRepository:
                        p.kind AS provider_kind, p.endpoint_url, p.configuration_json
                 FROM jobs j
                 JOIN books b ON b.id = j.book_id
-                JOIN narrator_profiles v ON v.id = j.narrator_profile_id
-                JOIN provider_instances p ON p.id = v.provider_instance_id
+                LEFT JOIN narrator_profiles v ON v.id = j.narrator_profile_id
+                JOIN provider_instances p
+                  ON p.id = COALESCE(j.provider_instance_id, v.provider_instance_id)
                 WHERE j.id = ?
                 """,
                 (job_id,),
@@ -389,6 +427,52 @@ class GenerationRepository:
         result["profile"] = json.loads(result.pop("profile_json"))
         result["provider_configuration"] = json.loads(result.pop("configuration_json"))
         return result
+
+    def list_job_voice_snapshots(self) -> list[dict[str, Any]]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT j.id, j.book_id, j.narrator_profile_id,
+                       j.voice_profile_snapshot_json,
+                       j.voice_profile_snapshot_sha256,
+                       v.profile_json AS current_profile_json
+                FROM jobs j
+                LEFT JOIN narrator_profiles v ON v.id = j.narrator_profile_id
+                WHERE j.voice_profile_snapshot_json IS NOT NULL
+                """
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["profile"] = json.loads(item.pop("voice_profile_snapshot_json"))
+            current = item.pop("current_profile_json")
+            item["current_profile"] = json.loads(current) if current else None
+            result.append(item)
+        return result
+
+    def update_job_voice_snapshot(
+        self,
+        job_id: str,
+        profile_snapshot: dict[str, Any],
+        profile_snapshot_sha256: str,
+    ) -> None:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET voice_profile_snapshot_json = ?,
+                    voice_profile_snapshot_sha256 = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(profile_snapshot, ensure_ascii=False, sort_keys=True),
+                    profile_snapshot_sha256,
+                    job_id,
+                ),
+            )
+        if cursor.rowcount != 1:
+            raise KeyError(f"Generation job not found: {job_id}")
 
     def list_chunks(self, job_id: str) -> list[StoredChunk]:
         with self.database.connect() as connection:

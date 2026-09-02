@@ -1,0 +1,68 @@
+{
+  "sample_text": "The house had been quiet all morning. Outside, rain moved softly across the garden, and somewhere beyond the trees a train disappeared into the distance. She closed the book in her hands and smiled. \"I suppose it's time,\" she said.",
+  "voices": [
+    {
+      "id": 1,
+      "name": "01 female",
+      "gender": "female",
+      "filename": "01_female.wav",
+      "style_instruction": "A warm audiobook narrator with clear diction, relaxed pacing, gentle warmth, and subtle emotional expression. Natural, intimate, and professional. Never theatrical or announcer-like."
+    },
+    {
+      "id": 2,
+      "name": "02 male",
+      "gender": "male",
+      "filename": "02_male.wav",
+      "style_instruction": "An elegant literary audiobook narrator with a refined natural voice, excellent diction, thoughtful pacing, understated emotion, and a sophisticated storytelling presence."
+    },
+    {
+      "id": 3,
+      "name": "03 male",
+      "gender": "male",
+      "filename": "03_male.wav",
+      "style_instruction": "A rich audiobook narrator with a warm full-bodied voice, medium-low pitch, confident but relaxed delivery, excellent diction, and restrained emotional depth."
+    },
+    {
+      "id": 4,
+      "name": "04 female",
+      "gender": "female",
+      "filename": "04_female.wav",
+      "style_instruction": "A mature audiobook narrator with a calm, reassuring voice, rich natural tone, measured pacing, excellent diction, and quiet emotional depth."
+    },
+    {
+      "id": 5,
+      "name": "05 female",
+      "gender": "female",
+      "filename": "05_female.wav",
+      "style_instruction": "A mature audiobook narrator with a calm, reassuring voice, rich natural tone, measured pacing, excellent diction, and quiet emotional depth."
+    },
+    {
+      "id": 6,
+      "name": "06 female",
+      "gender": "female",
+      "filename": "06_female.wav",
+      "style_instruction": "A younger adult audiobook narrator with a clear natural voice, warm conversational delivery, subtle energy, relaxed pacing, and expressive but restrained storytelling."
+    },
+    {
+      "id": 7,
+      "name": "07 male",
+      "gender": "male",
+      "filename": "07_male.wav",
+      "style_instruction": "A gentle audiobook narrator with a smooth calm voice, warm conversational tone, relaxed pacing, clear pronunciation, and restrained emotion."
+    },
+    {
+      "id": 8,
+      "name": "08 male",
+      "gender": "male",
+      "filename": "08_male.wav",
+      "style_instruction": "A younger adult audiobook narrator with a clear natural voice, friendly conversational delivery, subtle energy, relaxed pacing, and expressive but restrained storytelling."
+    },
+    {
+      "id": 9,
+      "name": "09 male",
+      "gender": "male",
+      "filename": "09_male.wav",
+      "style_instruction": "An immersive fiction audiobook narrator with natural conversational delivery, expressive but restrained emotion, thoughtful pauses, and subtle changes in tone for dialogue."
+    }
+  ]
+}

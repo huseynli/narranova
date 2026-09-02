@@ -84,6 +84,9 @@ class ArtifactLayout:
         safe_chunk_id = _validate_id(chunk_id, "chunk id")
         return self.job_root(book_id, job_id) / "chunks" / f"{safe_chunk_id}.wav"
 
+    def job_voice_reference(self, book_id: str, job_id: str) -> Path:
+        return self.job_root(book_id, job_id) / "voice" / "reference.wav"
+
     def voice_studio_draft(self, draft_id: str) -> Path:
         return self.voice_studio_root / _validate_id(draft_id, "voice studio draft id")
 

@@ -129,18 +129,25 @@ class DeleteArtifactsTests(unittest.TestCase):
             generation = workspace["generation"]
             layout = workspace["layout"]
             deletion = workspace["deletion"]
+            jobs = workspace["jobs"]
             job_id = str(workspace["job_id"])
             profile_id = str(workspace["profile_id"])
             profile_root = layout.voice_profile_root(profile_id)  # type: ignore[union-attr]
+            job_reference = layout.job_voice_reference(  # type: ignore[union-attr]
+                str(workspace["book_id"]), job_id
+            )
 
-            with self.assertRaisesRegex(ValueError, "generation jobs"):
+            with self.assertRaisesRegex(ValueError, "in use by 1 unfinished"):
                 deletion.voice_profile(profile_id)  # type: ignore[union-attr]
-            deletion.job(job_id)  # type: ignore[union-attr]
+            jobs.run(job_id)  # type: ignore[union-attr]
             deletion.voice_profile(profile_id)  # type: ignore[union-attr]
 
             self.assertFalse(profile_root.exists())
+            self.assertTrue(job_reference.is_file())
             with self.assertRaises(KeyError):
                 generation.get_voice_and_provider(profile_id)  # type: ignore[union-attr]
+            self.assertIsNone(generation.get_job(job_id)["narrator_profile_id"])  # type: ignore[union-attr]
+            self.assertEqual(generation.get_job(job_id)["status"], "completed")  # type: ignore[union-attr]
 
     def test_active_jobs_cannot_be_deleted_with_their_book_or_audio(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
