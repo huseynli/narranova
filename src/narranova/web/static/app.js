@@ -32,6 +32,15 @@ function filterProfiles() {
   document.querySelectorAll("[data-default-kind]").forEach((card) => {
     card.hidden = card.dataset.defaultKind !== providerKind;
   });
+  document.querySelectorAll("[data-custom-provider]").forEach((card) => {
+    card.hidden = card.dataset.customProvider !== providerId;
+  });
+  document.querySelectorAll("[data-custom-preview]").forEach((preview) => {
+    const hasVisiblePair = Array.from(
+      preview.querySelectorAll("[data-custom-provider]")
+    ).some((card) => !card.hidden);
+    preview.hidden = !hasVisiblePair;
+  });
 }
 
 if (providerSelect && profileSelect) {

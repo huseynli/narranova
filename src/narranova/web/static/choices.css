@@ -55,15 +55,11 @@
 .chapter:has(.chapter-choice input:not(:checked)) { background: #efede5; }
 .chapter:has(.chapter-choice input:not(:checked)) summary strong,
 .chapter:has(.chapter-choice input:not(:checked)) .units { opacity: .48; }
-.plan-save {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 22px;
+.plan-note {
   padding: 18px 22px;
   background: #ece9df;
 }
-.plan-save span { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.plan-note span { color: var(--muted); font-size: 11px; line-height: 1.4; }
 .head-actions, .chunk-actions, .confirm-actions { display: flex; align-items: center; gap: 12px; }
 .head-actions { align-items: flex-end; flex-direction: column; }
 .danger-link {
@@ -95,7 +91,7 @@
 .danger-button { border-color: var(--danger); background: var(--danger); color: white; }
 .danger-button:hover { background: #762217; }
 @media (max-width: 820px) {
-  .plan-form > header, .plan-save { align-items: stretch; flex-direction: column; }
+  .plan-form > header { align-items: stretch; flex-direction: column; }
   .plan-form .chapter summary { grid-template-columns: 28px minmax(0,1fr) 84px; }
   .plan-form .chapter summary > small, .chapter-choice b { display: none; }
 }

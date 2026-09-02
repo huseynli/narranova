@@ -626,8 +626,16 @@ class NarranovaWebApp:
             f"""<article data-default-kind="{self._e(pair.provider_kind)}"><div><span>{self._e(pair.id)}</span><strong>{self._e(pair.name)}</strong><small>{self._e(pair.gender)}</small></div><audio controls preload="none" src="/default-voices/{self._e(pair.id)}/audio"></audio><p>{self._e(pair.instruction)}</p></article>"""
             for pair in self.default_voices
         )
+        custom_previews = "".join(
+            f"""<article data-custom-provider="{self._e(profile.provider_id)}"><div><span>{index:02d}</span><strong>{self._e(profile.name)}</strong><small>{self._e(profile.provider_name)}</small></div><audio controls preload="none" src="/voices/{self._e(profile.id)}/reference/audio"></audio><p>{self._e(profile.profile.get('instruction', ''))}</p></article>"""
+            for index, profile in enumerate(profiles, start=1)
+        )
+        custom_preview = (
+            f'<details class="pair-preview custom-preview" data-custom-preview><summary>Listen to custom pairs</summary><div>{custom_previews}</div></details>'
+            if custom_previews else ""
+        )
         if providers and (profiles or compatible_builtin):
-            setup = f"""<form class="narration-form" method="post" action="/books/{self._e(book_id)}/jobs">{self._csrf(csrf)}<label>TTS connection<small>The service that will generate every chunk.</small><select name="provider_id" data-provider-select required>{provider_options}</select></label><label>Narrator pair<small>Choose an included pair or one of your custom profiles.</small><select name="voice_profile_id" data-profile-select required>{builtin_options}{profile_options}</select></label><details class="builtin-preview"><summary>Listen to built-in pairs</summary><div>{builtin_previews}</div></details><div class="selection-note"><span>✓</span><p>The selected pair's reference audio and matching instruction will be copied into this job.</p></div><button class="primary wide-button">Create narration job</button></form>"""
+            setup = f"""<form class="narration-form" method="post" action="/books/{self._e(book_id)}/jobs">{self._csrf(csrf)}<label>TTS connection<small>The service that will generate every chunk.</small><select name="provider_id" data-provider-select required>{provider_options}</select></label><label>Narrator pair<small>Choose an included pair or one of your custom profiles.</small><select name="voice_profile_id" data-profile-select required>{profile_options}{builtin_options}</select></label>{custom_preview}<details class="pair-preview builtin-preview"><summary>Listen to built-in pairs</summary><div>{builtin_previews}</div></details><div class="selection-note"><span>✓</span><p>The selected pair's reference audio and matching instruction will be copied into this job.</p></div><button class="primary wide-button">Create narration job</button></form>"""
         else:
             needs = []
             if not providers:
@@ -646,7 +654,6 @@ class NarranovaWebApp:
         if self.store.sha256(plan_path) != record["plan_sha256"]:
             raise RuntimeError("Narration plan failed hash validation")
         plan = NarrationPlan.from_json(plan_path.read_text(encoding="utf-8"))
-        voices = self.generation.list_voice_profiles()
         jobs = self.generation.list_jobs(book_id)
         units_by_id = {unit.id: unit for unit in plan.units}
         chapter_markup: list[str] = []
@@ -667,12 +674,12 @@ class NarranovaWebApp:
         chapters = "".join(chapter_markup)
         enabled_units = sum(unit.enabled for unit in plan.units)
         job_rows = "".join(
-            f'<a class="job-row" href="/jobs/{self._e(job.id)}"><span><strong>{self._e(job.id[:10])}</strong><small>{self._e(job.created_at)}</small></span><span class="status status-{self._e(job.status)}">{self._e(job.status)}</span></a>'
+            f'<a class="job-row" href="/jobs/{self._e(job.id)}"><span><strong>Narration {self._e(job.id[:8])}</strong><small>{self._e(job.created_at)}</small></span><span class="status status-{self._e(job.status)}">{self._e(job.status)}</span></a>'
             for job in jobs
         ) or '<div class="empty">No generation job yet.</div>'
-        body = f"""<a class="back" href="/">← Workspace</a><section class="book-head full-page-heading"><div><p class="eyebrow">Narration plan · revision {record['revision']}</p><h1>{self._e(book.title)}</h1><p>{self._e(book.author or 'Unknown author')} · {len(plan.chapters)} sections · {enabled_units} of {len(plan.units)} units included</p></div><div class="head-actions"><a class="button primary" href="/books/{self._e(book_id)}/narrations/new">Create narration</a><a class="danger-link" href="/books/{self._e(book_id)}/delete">Delete book</a></div></section>
-        <div class="book-grid"><main><section class="panel"><form class="plan-form" method="post" action="/books/{self._e(book_id)}/plan">{self._csrf(csrf)}<header><div><p class="eyebrow">Source map</p><h2>Choose what to narrate</h2><p class="section-help">Turn off front matter, tables of contents, copyright pages, or any other section you do not want spoken.</p></div><button class="primary">Save choices</button></header>{chapters}<div class="plan-save"><span>New jobs use this revision. Existing jobs keep their original text.</span><button class="primary">Save narration choices</button></div></form></section></main>
-        <aside class="stack"><section class="panel book-workflow"><header><div><p class="eyebrow">Production</p><h2>Ready when you are</h2></div></header><div class="workflow-counts"><div><strong>{len(voices)}</strong><span>available voices</span></div><div><strong>{len(jobs)}</strong><span>generation jobs</span></div></div><a class="button" href="/voices">Manage voice profiles</a><a class="button primary" href="/books/{self._e(book_id)}/narrations/new">Create narration job</a></section><section class="panel"><header><div><p class="eyebrow">Activity</p><h2>Generation jobs</h2></div><span class="count">{len(jobs):02d}</span></header>{job_rows}</section></aside></div>"""
+        body = f"""<a class="back" href="/">← Workspace</a><section class="book-head full-page-heading"><div><p class="eyebrow">Book workspace</p><h1>{self._e(book.title)}</h1><p>{self._e(book.author or 'Unknown author')} · {len(plan.chapters)} sections · {enabled_units} of {len(plan.units)} units included</p></div><div class="head-actions"><a class="danger-link" href="/books/{self._e(book_id)}/delete">Delete book</a></div></section>
+        <div class="book-grid"><main><section class="panel"><form class="plan-form" method="post" action="/books/{self._e(book_id)}/plan">{self._csrf(csrf)}<header><div><p class="eyebrow">Narration plan · revision {record['revision']}</p><h2>Choose what to narrate</h2><p class="section-help">Turn off front matter, tables of contents, copyright pages, or any other section you do not want spoken.</p></div><button class="primary">Save choices</button></header>{chapters}<div class="plan-note"><span>Saved changes create a new plan revision for future jobs. Existing jobs keep their original text.</span></div></form></section></main>
+        <aside class="stack"><section class="panel book-workflow"><header><div><p class="eyebrow">New narration</p><h2>Turn this plan into audio</h2></div></header><div class="book-workflow-body"><p>Choose a TTS connection and narrator pair for a new job using plan revision {record['revision']}.</p><a class="button primary" href="/books/{self._e(book_id)}/narrations/new">Set up narration</a></div></section><section class="panel"><header><div><p class="eyebrow">Activity</p><h2>Generation jobs</h2></div><span class="count">{len(jobs):02d}</span></header>{job_rows}</section></aside></div>"""
         return self._layout(book.title, body, environ)
 
     def _job(self, job_id: str, environ: dict[str, object], csrf: str) -> str:

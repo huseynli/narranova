@@ -174,6 +174,13 @@ class WebAppTests(unittest.TestCase):
             token = cookie.split(";", 1)[0].split("=", 1)[1]
             self.assertIn(b"Choose what to narrate", page)
             self.assertIn(b'name="chapter_1" checked', page)
+            self.assertEqual(page.count(b">Save choices</button>"), 1)
+            self.assertEqual(page.count(b"/narrations/new"), 1)
+            self.assertNotIn(b"Manage voice profiles", page)
+            self.assertNotIn(b"available voices", page)
+            self.assertNotIn(b"generation jobs</span>", page)
+            self.assertIn(b"Turn this plan into audio", page)
+            self.assertIn(b"Set up narration", page)
             body = urlencode({"csrf": token, "chapter_2": "on"}).encode()
 
             status, response_headers, _ = request(
@@ -394,6 +401,18 @@ class WebAppTests(unittest.TestCase):
             )
             self.assertIn(b'value="builtin:01"', narration_page)
             self.assertIn(b"Listen to built-in pairs", narration_page)
+            self.assertIn(b"Listen to custom pairs", narration_page)
+            self.assertLess(
+                narration_page.index(b">Custom " + bytes((194, 183)) + b" Working voice</option>"),
+                narration_page.index(b">Built in " + bytes((194, 183)) + b" 01 female</option>"),
+            )
+            self.assertLess(
+                narration_page.index(b"Listen to custom pairs"),
+                narration_page.index(b"Listen to built-in pairs"),
+            )
+            self.assertIn(b"Working voice", narration_page)
+            self.assertIn(f'data-custom-provider="{provider_id}"'.encode(), narration_page)
+            self.assertIn(f'/voices/{profile_id}/reference/audio'.encode(), narration_page)
 
             _, _, in_use_page = request(app, "/voices")
             self.assertIn(b"In use \xc2\xb7 1", in_use_page)
