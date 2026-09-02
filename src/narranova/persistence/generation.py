@@ -37,7 +37,10 @@ class StoredProvider:
 class StoredVoiceProfile:
     id: str
     book_id: str
+    book_title: str
+    provider_id: str
     provider_name: str
+    name: str
     profile: dict[str, Any]
 
 
@@ -84,26 +87,51 @@ class GenerationRepository:
             ).fetchall()
         return [StoredProvider(**dict(row)) for row in rows]
 
-    def list_voice_profiles(self, book_id: str) -> list[StoredVoiceProfile]:
+    def get_provider(self, provider_id: str) -> dict[str, Any]:
         with self.database.connect() as connection:
-            rows = connection.execute(
+            row = connection.execute(
                 """
-                SELECT v.id, v.book_id, p.name AS provider_name, v.profile_json
-                FROM voice_profiles v
-                JOIN provider_instances p ON p.id = v.provider_instance_id
-                WHERE v.book_id = ? ORDER BY v.created_at, v.id
+                SELECT id, kind, name, endpoint_url, configuration_json, enabled
+                FROM provider_instances WHERE id = ?
                 """,
-                (book_id,),
-            ).fetchall()
-        return [
-            StoredVoiceProfile(
-                id=row["id"],
-                book_id=row["book_id"],
-                provider_name=row["provider_name"],
-                profile=json.loads(row["profile_json"]),
+                (provider_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"TTS connection not found: {provider_id}")
+        result = dict(row)
+        result["configuration"] = json.loads(result.pop("configuration_json"))
+        return result
+
+    def list_voice_profiles(self, book_id: str | None = None) -> list[StoredVoiceProfile]:
+        query = """
+            SELECT v.id, v.book_id, COALESCE(b.title, 'Untitled') AS book_title,
+                   p.id AS provider_id, p.name AS provider_name, v.profile_json
+            FROM voice_profiles v
+            JOIN books b ON b.id = v.book_id
+            JOIN provider_instances p ON p.id = v.provider_instance_id
+        """
+        parameters: tuple[str, ...] = ()
+        if book_id is not None:
+            query += " WHERE v.book_id = ?"
+            parameters = (book_id,)
+        query += " ORDER BY v.created_at DESC, v.id DESC"
+        with self.database.connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        profiles = []
+        for row in rows:
+            profile = json.loads(row["profile_json"])
+            profiles.append(
+                StoredVoiceProfile(
+                    id=row["id"],
+                    book_id=row["book_id"],
+                    book_title=row["book_title"],
+                    provider_id=row["provider_id"],
+                    provider_name=row["provider_name"],
+                    name=str(profile.get("name") or "Untitled voice"),
+                    profile=profile,
+                )
             )
-            for row in rows
-        ]
+        return profiles
 
     def list_jobs(self, book_id: str | None = None) -> list[StoredJob]:
         query = """

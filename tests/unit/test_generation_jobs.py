@@ -64,6 +64,7 @@ class GenerationJobTests(unittest.TestCase):
                 provider_id=provider_id,
                 reference_audio=reference,
                 instruction="A careful narrator.",
+                name="Careful narrator",
             )
             fake = FakeProvider()
             jobs = GenerationJobs(
@@ -71,6 +72,11 @@ class GenerationJobTests(unittest.TestCase):
             )
 
             job_id = jobs.create(imported.book_id, profile_id)
+            other_provider_id = profiles.add_openmoss_provider(
+                "Other MOSS", "http://other-moss.test:8000/tts"
+            )
+            with self.assertRaisesRegex(ValueError, "selected TTS connection"):
+                jobs.create(imported.book_id, profile_id, other_provider_id)
             jobs.run(job_id)
 
             chunks = generation.list_chunks(job_id)

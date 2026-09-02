@@ -46,7 +46,7 @@ class WebAppTests(unittest.TestCase):
             status, headers, body = request(app)
 
             self.assertEqual(status, "200 OK")
-            self.assertIn(b"Turn a book into a voice", body)
+            self.assertIn(b"Your audiobook desk", body)
             self.assertIn(b"No books yet", body)
             self.assertTrue(any(name == "Set-Cookie" for name, _ in headers))
 
@@ -185,6 +185,41 @@ class WebAppTests(unittest.TestCase):
                 "/?notice=Book+deleted",
             )
             self.assertEqual(app.books.list_books(), [])
+
+    def test_connections_and_voice_studio_have_dedicated_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "book.epub"
+            make_epub(source)
+            app = create_web_app(root / "data")
+            imported = app.import_book.execute(source)
+
+            status, _, connections = request(app, "/connections")
+            self.assertEqual(status, "200 OK")
+            self.assertIn(b"Connect your voice engine", connections)
+            self.assertIn(b'action="/connections"', connections)
+
+            _, headers, voices = request(app, "/voices")
+            cookie = next(value for name, value in headers if name == "Set-Cookie")
+            token = cookie.split(";", 1)[0].split("=", 1)[1]
+            self.assertIn(b"Find a voice worth keeping", voices)
+
+            status, response_headers, _ = request(
+                app,
+                "/voices/drafts",
+                method="POST",
+                body=urlencode({"csrf": token, "book_id": imported.book_id}).encode(),
+                cookie=cookie,
+            )
+            location = next(value for name, value in response_headers if name == "Location")
+            self.assertEqual(status, "303 See Other")
+            self.assertTrue(location.startswith("/voices/drafts/"))
+
+            status, _, studio = request(app, location)
+            self.assertEqual(status, "200 OK")
+            self.assertIn(b"Shape the narrator", studio)
+            self.assertIn(b"Warm literary", studio)
+            self.assertIn(b"The rain had stopped", studio)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ from narranova.application.deletion import DeleteArtifacts
 from narranova.application.generation import GenerationJobs, VoiceProfiles
 from narranova.application.ingest import ImportBook
 from narranova.application.revise_plan import ReviseNarrationPlan
+from narranova.application.voice_studio import INSTRUCTION_PRESETS, VoiceStudio
 from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.audio import validate_wave
 from narranova.config import Settings
@@ -83,6 +84,7 @@ class NarranovaWebApp:
         profiles: VoiceProfiles,
         jobs: GenerationJobs,
         deletion: DeleteArtifacts,
+        voice_studio: VoiceStudio,
     ) -> None:
         self.settings = settings
         self.books = books
@@ -94,6 +96,7 @@ class NarranovaWebApp:
         self.profiles = profiles
         self.jobs = jobs
         self.deletion = deletion
+        self.voice_studio = voice_studio
         self.supervisor = JobSupervisor(jobs)
 
     def __call__(self, environ: dict[str, object], start_response: StartResponse) -> Iterable[bytes]:
@@ -101,13 +104,58 @@ class NarranovaWebApp:
         path = unquote(str(environ.get("PATH_INFO", "/")))
         csrf, set_cookie = self._csrf_token(environ)
         try:
-            if method == "GET" and path in {"/static/app.css", "/static/choices.css"}:
+            if method == "GET" and path in {
+                "/static/app.css",
+                "/static/choices.css",
+                "/static/app.js",
+            }:
                 asset_name = path.rsplit("/", 1)[-1]
                 content = files("narranova.web.static").joinpath(asset_name).read_bytes()
-                return self._respond(start_response, "200 OK", content, "text/css; charset=utf-8")
+                content_type = (
+                    "text/javascript; charset=utf-8"
+                    if asset_name.endswith(".js")
+                    else "text/css; charset=utf-8"
+                )
+                return self._respond(start_response, "200 OK", content, content_type)
             if method == "GET" and path == "/":
                 return self._html(start_response, self._dashboard(environ, csrf), set_cookie)
             parts = [part for part in path.split("/") if part]
+            if method == "GET" and parts == ["connections"]:
+                return self._html(start_response, self._connections(environ, csrf), set_cookie)
+            if method == "GET" and parts == ["voices"]:
+                return self._html(start_response, self._voices(environ, csrf), set_cookie)
+            if method == "GET" and len(parts) == 3 and parts[:2] == ["voices", "drafts"]:
+                return self._html(
+                    start_response,
+                    self._voice_studio(parts[2], environ, csrf),
+                    set_cookie,
+                )
+            if (
+                method == "GET"
+                and len(parts) == 6
+                and parts[:2] == ["voices", "drafts"]
+                and parts[3] == "takes"
+                and parts[5] == "audio"
+            ):
+                return self._studio_audio(start_response, parts[2], parts[4])
+            if (
+                method == "GET"
+                and len(parts) == 4
+                and parts[0] == "voices"
+                and parts[2:] == ["reference", "audio"]
+            ):
+                return self._profile_audio(start_response, parts[1])
+            if (
+                method == "GET"
+                and len(parts) == 4
+                and parts[0] == "books"
+                and parts[2:] == ["narrations", "new"]
+            ):
+                return self._html(
+                    start_response,
+                    self._new_narration(parts[1], environ, csrf),
+                    set_cookie,
+                )
             if method == "GET" and len(parts) == 2 and parts[0] == "books":
                 return self._html(start_response, self._book(parts[1], environ, csrf), set_cookie)
             if method == "GET" and len(parts) == 2 and parts[0] == "jobs":
@@ -192,11 +240,49 @@ class NarranovaWebApp:
                 raise ValueError("Choose an EPUB to import")
             result = self.import_book.execute(upload.path)
             return self._redirect(start_response, f"/books/{result.book_id}?notice=Book+imported")
-        if parts == ["actions", "providers"]:
+        if parts in (["actions", "providers"], ["connections"]):
             provider_id = self.profiles.add_openmoss_provider(
                 fields.get("name", ""), fields.get("endpoint", "")
             )
-            return self._redirect(start_response, f"/?notice=Provider+registered+{provider_id}")
+            return self._redirect(
+                start_response,
+                f"/connections?notice=Connection+saved+{provider_id}",
+            )
+        if parts == ["voices", "drafts"]:
+            draft_id = self.voice_studio.start(fields.get("book_id", ""))
+            return self._redirect(start_response, f"/voices/drafts/{draft_id}")
+        if len(parts) == 4 and parts[:2] == ["voices", "drafts"] and parts[3] == "auditions":
+            upload = uploads.get("reference")
+            self.voice_studio.generate_take(
+                parts[2],
+                provider_id=fields.get("provider_id", ""),
+                reference_choice=fields.get("reference_choice", ""),
+                instruction=fields.get("instruction", ""),
+                sample_text=fields.get("sample_text", ""),
+                language=fields.get("language", "English"),
+                profile_name=fields.get("name", ""),
+                uploaded_reference=upload.path if upload else None,
+            )
+            return self._redirect(
+                start_response,
+                f"/voices/drafts/{parts[2]}?notice=New+audition+ready",
+            )
+        if len(parts) == 4 and parts[:2] == ["voices", "drafts"] and parts[3] == "save":
+            profile_id, book_id = self.voice_studio.save_profile(
+                parts[2],
+                name=fields.get("name", ""),
+                provider_id=fields.get("provider_id", ""),
+                reference_choice=fields.get("reference_choice", ""),
+                instruction=fields.get("instruction", ""),
+                language=fields.get("language", "English"),
+            )
+            return self._redirect(
+                start_response,
+                f"/books/{book_id}/narrations/new?notice=Voice+profile+saved+{profile_id}",
+            )
+        if len(parts) == 4 and parts[:2] == ["voices", "drafts"] and parts[3] == "discard":
+            self.voice_studio.discard(parts[2])
+            return self._redirect(start_response, "/voices?notice=Voice+draft+discarded")
         if len(parts) == 3 and parts[0] == "books" and parts[2] == "voices":
             upload = uploads.get("reference")
             if upload is None:
@@ -225,7 +311,11 @@ class NarranovaWebApp:
             )
             return self._redirect(start_response, f"/books/{parts[1]}?notice={notice}")
         if len(parts) == 3 and parts[0] == "books" and parts[2] == "jobs":
-            job_id = self.jobs.create(parts[1], fields.get("voice_profile_id", ""))
+            job_id = self.jobs.create(
+                parts[1],
+                fields.get("voice_profile_id", ""),
+                fields.get("provider_id") or None,
+            )
             return self._redirect(start_response, f"/jobs/{job_id}?notice=Generation+job+created")
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "run":
             started = self.supervisor.start(parts[1])
@@ -255,6 +345,7 @@ class NarranovaWebApp:
     def _dashboard(self, environ: dict[str, object], csrf: str) -> str:
         books = self.books.list_books()
         providers = self.generation.list_providers()
+        profiles = self.generation.list_voice_profiles()
         jobs = self.generation.list_jobs()[:8]
         book_cards = "".join(
             f"""
@@ -267,23 +358,145 @@ class NarranovaWebApp:
             for book in books
         ) or '<div class="empty">No books yet. Import an EPUB to begin.</div>'
         job_rows = "".join(
-            f'<a class="job-row" href="/jobs/{self._e(job.id)}"><span><strong>{self._e(job.book_title)}</strong><small>{self._e(job.id[:10])}</small></span><span class="status status-{self._e(job.status)}">{self._e(job.status)}</span></a>'
+            f'<a class="job-row" href="/jobs/{self._e(job.id)}"><span><strong>{self._e(job.book_title)}</strong><small>Job {self._e(job.id[:10])}</small></span><span class="status status-{self._e(job.status)}">{self._e(job.status)}</span></a>'
             for job in jobs
         ) or '<div class="empty">Generation jobs will appear here.</div>'
-        provider_rows = "".join(
-            f'<li><span class="signal"></span><span><strong>{self._e(provider.name)}</strong><small>{self._e(provider.endpoint_url)}</small></span></li>'
-            for provider in providers
-        ) or '<li class="empty">No provider configured.</li>'
         body = f"""
-        <section class="welcome"><div><p class="eyebrow">Production workspace</p><h1>Turn a book into a voice.</h1><p>Import, review, and generate without losing your place.</p></div>
-          <form class="upload-card" method="post" action="/actions/import" enctype="multipart/form-data">
-            {self._csrf(csrf)}<label for="epub">Import a DRM-free EPUB</label><input id="epub" name="epub" type="file" accept=".epub,application/epub+zip" required><button class="primary">Import book</button>
+        <section class="page-heading workspace-heading"><div><p class="eyebrow">Production workspace</p><h1>Your audiobook desk</h1><p>Bring in a book, shape its narration, then generate at your own pace.</p></div>
+          <form class="import-card" method="post" action="/actions/import" enctype="multipart/form-data">
+            {self._csrf(csrf)}<label for="epub">Add a DRM-free EPUB</label><div><input id="epub" name="epub" type="file" accept=".epub,application/epub+zip" required><button class="primary">Import book</button></div>
           </form></section>
-        <div class="dashboard-grid"><section class="panel library"><header><div><p class="eyebrow">Library</p><h2>Your books</h2></div><span class="count">{len(books):02d}</span></header>{book_cards}</section>
-        <aside class="stack"><section class="panel"><header><div><p class="eyebrow">Activity</p><h2>Recent jobs</h2></div></header>{job_rows}</section>
-        <section class="panel provider-panel"><header><div><p class="eyebrow">Connections</p><h2>OpenMOSS</h2></div></header><ul>{provider_rows}</ul>
-          <details><summary>Add endpoint</summary><form method="post" action="/actions/providers">{self._csrf(csrf)}<label>Name<input name="name" placeholder="Studio MOSS" required></label><label>/tts endpoint<input name="endpoint" type="url" value="http://127.0.0.1:8000/tts" required></label><button>Add provider</button></form></details></section></aside></div>"""
+        <section class="stat-strip"><a href="/"><strong>{len(books)}</strong><span>Books</span></a><a href="/connections"><strong>{len(providers)}</strong><span>TTS connections</span></a><a href="/voices"><strong>{len(profiles)}</strong><span>Voice profiles</span></a><a href="#recent-jobs"><strong>{len(jobs)}</strong><span>Recent jobs</span></a></section>
+        <div class="dashboard-grid"><section class="panel library"><header><div><p class="eyebrow">Library</p><h2>Books in progress</h2></div><span class="count">{len(books):02d}</span></header>{book_cards}</section>
+        <aside class="stack"><section class="panel next-step"><header><div><p class="eyebrow">Set up</p><h2>Prepare your studio</h2></div></header><a href="/connections"><span class="step-number">01</span><span><strong>Connect a TTS service</strong><small>Point Narranova at your external OpenMOSS server.</small></span><b>→</b></a><a href="/voices"><span class="step-number">02</span><span><strong>Build a voice profile</strong><small>Audition instructions and reference audio together.</small></span><b>→</b></a></section>
+        <section class="panel" id="recent-jobs"><header><div><p class="eyebrow">Activity</p><h2>Recent jobs</h2></div></header>{job_rows}</section></aside></div>"""
         return self._layout("Workspace", body, environ)
+
+    def _connections(self, environ: dict[str, object], csrf: str) -> str:
+        providers = self.generation.list_providers()
+        cards = "".join(
+            f"""<article class="connection-card"><div class="connection-icon">M</div><div><span class="status status-completed">Ready</span><h3>{self._e(provider.name)}</h3><p>{self._e(provider.endpoint_url)}</p><small>External OpenMOSS · streaming PCM</small></div></article>"""
+            for provider in providers
+        ) or """<div class="empty-state"><span>M</span><h3>No TTS connection yet</h3><p>Add the /tts URL from your separately running OpenMOSS server.</p></div>"""
+        body = f"""<section class="page-heading"><div><p class="eyebrow">TTS connections</p><h1>Connect your voice engine</h1><p>Narranova sends text and approved voice references to services you operate separately.</p></div></section>
+        <div class="settings-grid"><main><div class="section-heading"><div><h2>Saved connections</h2><p>{len(providers)} configured</p></div></div><div class="connection-list">{cards}</div></main>
+        <aside class="panel form-card"><header><div><p class="eyebrow">New connection</p><h2>Add OpenMOSS</h2></div></header><form method="post" action="/connections">{self._csrf(csrf)}<label>Connection name<small>Use a name that identifies the machine or model.</small><input name="name" placeholder="Studio MOSS" required></label><label>OpenMOSS /tts URL<small>MOSS remains external to Narranova.</small><input name="endpoint" type="url" value="http://127.0.0.1:8000/tts" required></label><button class="primary">Save connection</button></form></aside></div>"""
+        return self._layout("Connections", body, environ)
+
+    def _voices(self, environ: dict[str, object], csrf: str) -> str:
+        books = self.books.list_books()
+        profiles = self.generation.list_voice_profiles()
+        query = parse_qs(str(environ.get("QUERY_STRING", "")))
+        selected_book = query.get("book_id", [""])[0]
+        book_options = "".join(
+            f'<option value="{self._e(book.id)}"{" selected" if book.id == selected_book else ""}>{self._e(book.title)}</option>'
+            for book in books
+        )
+        profile_cards = "".join(
+            f"""<article class="voice-card"><header><span class="voice-avatar">{self._e(profile.name[:1].upper())}</span><div><h3>{self._e(profile.name)}</h3><p>{self._e(profile.book_title)} · {self._e(profile.provider_name)}</p></div></header><blockquote>{self._e(profile.profile.get('instruction', ''))}</blockquote><audio controls preload="none" src="/voices/{self._e(profile.id)}/reference/audio"></audio></article>"""
+            for profile in profiles
+        ) or """<div class="empty-state"><span>V</span><h3>No saved voices</h3><p>Create an audition workspace to find your first reference and instruction pair.</p></div>"""
+        start = (
+            f"""<form method="post" action="/voices/drafts">{self._csrf(csrf)}<label>Book<select name="book_id" required><option value="">Choose a book</option>{book_options}</select></label><button class="primary">Open Voice Studio</button></form>"""
+            if books
+            else '<p class="empty">Import a book before creating its voice profile.</p><a class="button primary" href="/">Go to workspace</a>'
+        )
+        body = f"""<section class="page-heading"><div><p class="eyebrow">Voice profiles</p><h1>Find a voice worth keeping</h1><p>Pair a reference WAV with precise direction, audition it, and save only the combination you approve.</p></div></section><div class="voice-library-grid"><main><div class="section-heading"><div><h2>Saved profiles</h2><p>{len(profiles)} ready for narration</p></div></div><div class="voice-list">{profile_cards}</div></main><aside class="panel start-studio"><div class="studio-glyph">♪</div><p class="eyebrow">Voice Studio</p><h2>Start an audition</h2><p>Try curated narration directions against short sample lines. Regenerate until the voice feels right.</p>{start}</aside></div>"""
+        return self._layout("Voices", body, environ)
+
+    def _voice_studio(self, draft_id: str, environ: dict[str, object], csrf: str) -> str:
+        draft = self.voice_studio.get(draft_id)
+        book = self.books.get_book(str(draft["book_id"]))
+        providers = self.generation.list_providers()
+        profiles = self.generation.list_voice_profiles(book.id)
+        selected_provider = str(draft.get("provider_id") or "")
+        provider_options = "".join(
+            f'<option value="{self._e(item.id)}"{" selected" if item.id == selected_provider else ""}>{self._e(item.name)}</option>'
+            for item in providers
+            if item.enabled
+        )
+        preset_buttons = "".join(
+            f'<button type="button" class="prompt-chip" data-instruction="{self._e(instruction)}"><strong>{self._e(name)}</strong><span>{self._e(instruction)}</span></button>'
+            for name, instruction in INSTRUCTION_PRESETS
+        )
+        reference_options = ['<option value="">Choose a starting reference</option>']
+        if draft.get("uploaded_reference_path"):
+            reference_options.append('<option value="uploaded">Uploaded reference WAV</option>')
+        reference_options.extend(
+            f'<option value="profile:{self._e(profile.id)}">Saved profile · {self._e(profile.name)}</option>'
+            for profile in profiles
+        )
+        reference_options.extend(
+            f'<option value="take:{self._e(take["id"])}">Audition take · {len(draft["takes"]) - index:02d}</option>'
+            for index, take in enumerate(reversed(draft["takes"]))
+        )
+        takes = "".join(
+            f"""<article class="take-card"><div class="take-index">{len(draft['takes']) - index:02d}</div><div class="take-main"><div><strong>Audition take</strong><span>{float(take['duration_seconds']):.1f} seconds</span></div><audio controls preload="none" src="/voices/drafts/{self._e(draft_id)}/takes/{self._e(take['id'])}/audio"></audio><details><summary>Direction used</summary><p>{self._e(take['instruction'])}</p></details></div></article>"""
+            for index, take in enumerate(reversed(draft["takes"]))
+        ) or '<div class="empty-state compact"><span>♪</span><h3>Your auditions will appear here</h3><p>Use a short reference with clean speech and little background noise.</p></div>'
+        save_references: list[str] = []
+        if draft.get("uploaded_reference_path"):
+            save_references.append('<label class="reference-radio"><input type="radio" name="reference_choice" value="uploaded"><span><strong>Uploaded WAV</strong><small>Keep the original reference</small></span></label>')
+        save_references.extend(
+            f'<label class="reference-radio"><input type="radio" name="reference_choice" value="take:{self._e(take["id"])}"{" checked" if index == 0 else ""}><span><strong>Audition take {len(draft["takes"]) - index:02d}</strong><small>{float(take["duration_seconds"]):.1f}s generated sample</small></span></label>'
+            for index, take in enumerate(reversed(draft["takes"]))
+        )
+        save_references.extend(
+            f'<label class="reference-radio"><input type="radio" name="reference_choice" value="profile:{self._e(profile.id)}"><span><strong>{self._e(profile.name)}</strong><small>Existing saved reference</small></span></label>'
+            for profile in profiles
+        )
+        can_audition = bool(providers)
+        can_save = bool(save_references and providers)
+        connection_warning = (
+            ""
+            if can_audition
+            else '<div class="studio-warning"><strong>Connection needed</strong><span>Add OpenMOSS before generating your first take.</span><a href="/connections">Set up connection →</a></div>'
+        )
+        audition_form = f"""<form class="audition-form" method="post" action="/voices/drafts/{self._e(draft_id)}/auditions" enctype="multipart/form-data">{self._csrf(csrf)}{connection_warning}<div class="form-row"><label>Connection<select name="provider_id" required><option value="">Choose a connection</option>{provider_options}</select></label><label>Language<input name="language" value="{self._e(draft.get('language', 'English'))}"></label></div><fieldset><legend>1. Choose a direction</legend><p class="field-help">Start with an example, then make it your own. Specific pacing and emotional guidance works best.</p><div class="prompt-grid">{preset_buttons}</div><label for="instruction">Your narration instruction<textarea id="instruction" name="instruction" rows="5" required>{self._e(draft.get('instruction', ''))}</textarea></label></fieldset><fieldset><legend>2. Choose reference audio</legend><p class="field-help">Select an existing reference or upload a clean WAV. An upload takes priority for this audition.</p><label>Starting reference<select name="reference_choice">{''.join(reference_options)}</select></label><label class="file-drop">Upload a reference WAV<input type="file" name="reference" accept="audio/wav,.wav"><span>Choose a short, clean speech sample</span></label></fieldset><fieldset><legend>3. Read the test lines</legend><p class="field-help">Edit these if you need to test names, dialogue, punctuation, or a particular mood.</p><label for="sample_text">Audition text<textarea id="sample_text" name="sample_text" rows="5" maxlength="2000" required>{self._e(draft.get('sample_text', ''))}</textarea></label></fieldset><input type="hidden" name="name" value="{self._e(draft.get('name', ''))}"><button class="primary wide-button"{"" if can_audition else " disabled"}>Generate new audition</button></form>"""
+        save_form = (
+            f"""<form method="post" action="/voices/drafts/{self._e(draft_id)}/save">{self._csrf(csrf)}<input type="hidden" name="provider_id" value="{self._e(selected_provider or (providers[0].id if providers else ''))}"><label>Profile name<input name="name" value="{self._e(draft.get('name', ''))}" placeholder="Warm literary narrator" required></label><label>Final instruction<textarea name="instruction" rows="5" required>{self._e(draft.get('instruction', ''))}</textarea></label><label>Language<input name="language" value="{self._e(draft.get('language', 'English'))}"></label><fieldset class="reference-list"><legend>Reference to keep</legend>{''.join(save_references)}</fieldset><button class="primary wide-button">Save voice profile</button><p class="cleanup-note">Saving keeps only this pair. Other audition audio and draft files are deleted automatically.</p></form>"""
+            if can_save
+            else '<div class="empty-state compact"><h3>Choose a reference first</h3><p>Upload a WAV or generate an audition before saving the profile.</p></div>'
+        )
+        body = f"""<a class="back" href="/voices">← Voice profiles</a><section class="studio-heading"><div><p class="eyebrow">Voice Studio · {self._e(book.title)}</p><h1>Shape the narrator</h1><p>Generate as many short auditions as you need. Nothing becomes permanent until you save a profile.</p></div><form method="post" action="/voices/drafts/{self._e(draft_id)}/discard">{self._csrf(csrf)}<button class="quiet-danger">Discard draft</button></form></section><div class="studio-grid"><main class="panel studio-builder">{audition_form}</main><aside class="studio-results"><section><div class="section-heading"><div><p class="eyebrow">Listen back</p><h2>Audition takes</h2></div><span class="count">{len(draft['takes']):02d}</span></div><div class="take-list">{takes}</div></section><section class="panel save-profile"><header><div><p class="eyebrow">Approved pair</p><h2>Save this voice</h2></div></header>{save_form}</section></aside></div>"""
+        return self._layout("Voice Studio", body, environ)
+
+    def _new_narration(self, book_id: str, environ: dict[str, object], csrf: str) -> str:
+        book = self.books.get_book(book_id)
+        record = self.books.get_plan_record(book_id)
+        plan_path = self._artifact(record["artifact_path"])
+        if self.store.sha256(plan_path) != record["plan_sha256"]:
+            raise RuntimeError("Narration plan failed hash validation")
+        plan = NarrationPlan.from_json(plan_path.read_text(encoding="utf-8"))
+        providers = [item for item in self.generation.list_providers() if item.enabled]
+        provider_ids = {item.id for item in providers}
+        profiles = [
+            item
+            for item in self.generation.list_voice_profiles(book_id)
+            if item.provider_id in provider_ids
+        ]
+        preferred_provider_id = profiles[0].provider_id if profiles else ""
+        enabled_units = sum(unit.enabled for unit in plan.units)
+        provider_options = "".join(
+            f'<option value="{self._e(item.id)}"{" selected" if item.id == preferred_provider_id else ""}>{self._e(item.name)}</option>'
+            for item in providers
+        )
+        profile_options = "".join(
+            f'<option value="{self._e(item.id)}" data-provider="{self._e(item.provider_id)}">{self._e(item.name)} · {self._e(item.provider_name)}</option>'
+            for item in profiles
+        )
+        if providers and profiles:
+            setup = f"""<form class="narration-form" method="post" action="/books/{self._e(book_id)}/jobs">{self._csrf(csrf)}<label>TTS connection<small>The service that will generate every chunk.</small><select name="provider_id" data-provider-select required>{provider_options}</select></label><label>Voice profile<small>The approved reference and instruction pair.</small><select name="voice_profile_id" data-profile-select required>{profile_options}</select></label><div class="selection-note"><span>✓</span><p>The selected voice direction and reference WAV will be sent with each chunk.</p></div><button class="primary wide-button">Create narration job</button></form>"""
+        else:
+            needs = []
+            if not providers:
+                needs.append('<a class="setup-missing" href="/connections"><span>01</span><div><strong>Add a TTS connection</strong><small>Connect your external OpenMOSS service.</small></div><b>→</b></a>')
+            if not profiles:
+                needs.append(f'<form method="post" action="/voices/drafts" class="setup-missing">{self._csrf(csrf)}<input type="hidden" name="book_id" value="{self._e(book_id)}"><span>02</span><div><strong>Create a voice profile</strong><small>Audition a reference and instruction pair.</small></div><button aria-label="Open Voice Studio">→</button></form>')
+            setup = f'<div class="missing-stack">{"".join(needs)}</div>'
+        jobs = self.generation.list_jobs(book_id)
+        body = f"""<a class="back" href="/books/{self._e(book_id)}">← Back to book</a><section class="page-heading narration-heading"><div><p class="eyebrow">New narration</p><h1>{self._e(book.title)}</h1><p>Choose the engine and the approved voice pair for this run.</p></div></section><div class="narration-grid"><main class="panel narration-setup"><header><div><p class="eyebrow">Generation setup</p><h2>How should this book sound?</h2></div></header>{setup}</main><aside class="run-summary"><section class="panel"><header><div><p class="eyebrow">Plan summary</p><h2>Ready to generate</h2></div></header><dl><div><dt>Plan revision</dt><dd>{record['revision']}</dd></div><div><dt>Sections</dt><dd>{len(plan.chapters)}</dd></div><div><dt>Included units</dt><dd>{enabled_units}</dd></div><div><dt>Previous jobs</dt><dd>{len(jobs)}</dd></div></dl><a class="button" href="/books/{self._e(book_id)}">Review narration sections</a></section></aside></div>"""
+        return self._layout("New narration", body, environ)
 
     def _book(self, book_id: str, environ: dict[str, object], csrf: str) -> str:
         book = self.books.get_book(book_id)
@@ -292,16 +505,8 @@ class NarranovaWebApp:
         if self.store.sha256(plan_path) != record["plan_sha256"]:
             raise RuntimeError("Narration plan failed hash validation")
         plan = NarrationPlan.from_json(plan_path.read_text(encoding="utf-8"))
-        providers = self.generation.list_providers()
         voices = self.generation.list_voice_profiles(book_id)
         jobs = self.generation.list_jobs(book_id)
-        provider_options = "".join(
-            f'<option value="{self._e(item.id)}">{self._e(item.name)}</option>' for item in providers if item.enabled
-        )
-        voice_options = "".join(
-            f'<option value="{self._e(item.id)}">{self._e(item.provider_name)} · {self._e(str(item.profile.get("instruction", ""))[:54])}</option>'
-            for item in voices
-        )
         units_by_id = {unit.id: unit for unit in plan.units}
         chapter_markup: list[str] = []
         for index, chapter in enumerate(plan.chapters):
@@ -324,18 +529,9 @@ class NarranovaWebApp:
             f'<a class="job-row" href="/jobs/{self._e(job.id)}"><span><strong>{self._e(job.id[:10])}</strong><small>{self._e(job.created_at)}</small></span><span class="status status-{self._e(job.status)}">{self._e(job.status)}</span></a>'
             for job in jobs
         ) or '<div class="empty">No generation job yet.</div>'
-        voice_form = (
-            f"""<form method="post" action="/books/{self._e(book_id)}/voices" enctype="multipart/form-data">{self._csrf(csrf)}
-            <label>Provider<select name="provider_id" required>{provider_options}</select></label><label>Approved reference WAV<input type="file" name="reference" accept="audio/wav,.wav" required></label><label>Narrator instruction<textarea name="instruction" rows="3" required>A natural audiobook narrator with restrained emotion and thoughtful pacing.</textarea></label><label>Language<input name="language" value="English"></label><button>Create voice profile</button></form>"""
-            if provider_options else '<p class="empty">Add an OpenMOSS endpoint from the workspace first.</p>'
-        )
-        job_form = (
-            f'<form class="inline-form" method="post" action="/books/{self._e(book_id)}/jobs">{self._csrf(csrf)}<select name="voice_profile_id" required>{voice_options}</select><button class="primary">Create generation job</button></form>'
-            if voice_options else '<p class="empty">Create an approved voice profile before generating.</p>'
-        )
-        body = f"""<a class="back" href="/">← Workspace</a><section class="book-head"><div><p class="eyebrow">Narration plan · revision {record['revision']}</p><h1>{self._e(book.title)}</h1><p>{self._e(book.author or 'Unknown author')} · {len(plan.chapters)} sections · {enabled_units} of {len(plan.units)} units included</p></div><div class="head-actions"><span class="status status-{self._e(book.status)}">{self._e(book.status)}</span><a class="danger-link" href="/books/{self._e(book_id)}/delete">Delete book</a></div></section>
-        <div class="book-grid"><main><section class="panel"><form class="plan-form" method="post" action="/books/{self._e(book_id)}/plan">{self._csrf(csrf)}<header><div><p class="eyebrow">Source map</p><h2>Choose what to narrate</h2><p class="section-help">Turn off front matter, tables of contents, copyright pages, or any other section you do not want spoken.</p></div><button class="primary">Save narration choices</button></header>{chapters}<div class="plan-save"><span>New generation jobs use the latest saved revision. Existing jobs keep their original text.</span><button class="primary">Save narration choices</button></div></form></section></main>
-        <aside class="stack"><section class="panel"><header><div><p class="eyebrow">Voice</p><h2>Approved profile</h2></div></header>{voice_form}</section><section class="panel"><header><div><p class="eyebrow">Generate</p><h2>Audio jobs</h2></div></header>{job_form}{job_rows}</section></aside></div>"""
+        body = f"""<a class="back" href="/">← Workspace</a><section class="book-head"><div><p class="eyebrow">Narration plan · revision {record['revision']}</p><h1>{self._e(book.title)}</h1><p>{self._e(book.author or 'Unknown author')} · {len(plan.chapters)} sections · {enabled_units} of {len(plan.units)} units included</p></div><div class="head-actions"><a class="button primary" href="/books/{self._e(book_id)}/narrations/new">Create narration</a><a class="danger-link" href="/books/{self._e(book_id)}/delete">Delete book</a></div></section>
+        <div class="book-grid"><main><section class="panel"><form class="plan-form" method="post" action="/books/{self._e(book_id)}/plan">{self._csrf(csrf)}<header><div><p class="eyebrow">Source map</p><h2>Choose what to narrate</h2><p class="section-help">Turn off front matter, tables of contents, copyright pages, or any other section you do not want spoken.</p></div><button class="primary">Save choices</button></header>{chapters}<div class="plan-save"><span>New jobs use this revision. Existing jobs keep their original text.</span><button class="primary">Save narration choices</button></div></form></section></main>
+        <aside class="stack"><section class="panel book-workflow"><header><div><p class="eyebrow">Production</p><h2>Ready when you are</h2></div></header><div class="workflow-counts"><div><strong>{len(voices)}</strong><span>voice profiles</span></div><div><strong>{len(jobs)}</strong><span>generation jobs</span></div></div><form method="post" action="/voices/drafts">{self._csrf(csrf)}<input type="hidden" name="book_id" value="{self._e(book_id)}"><button>Open Voice Studio</button></form><a class="button primary" href="/books/{self._e(book_id)}/narrations/new">Create narration job</a></section><section class="panel"><header><div><p class="eyebrow">Activity</p><h2>Generation jobs</h2></div></header>{job_rows}</section></aside></div>"""
         return self._layout(book.title, body, environ)
 
     def _job(self, job_id: str, environ: dict[str, object], csrf: str) -> str:
@@ -378,12 +574,44 @@ class NarranovaWebApp:
             raise RuntimeError("Audio failed hash validation")
         return self._respond(start_response, "200 OK", path.read_bytes(), "audio/wav")
 
+    def _studio_audio(
+        self,
+        start_response: StartResponse,
+        draft_id: str,
+        take_id: str,
+    ) -> Iterable[bytes]:
+        path, _ = self.voice_studio.take_audio(draft_id, take_id)
+        return self._respond(start_response, "200 OK", path.read_bytes(), "audio/wav")
+
+    def _profile_audio(
+        self,
+        start_response: StartResponse,
+        profile_id: str,
+    ) -> Iterable[bytes]:
+        voice = self.generation.get_voice_and_provider(profile_id)
+        profile = voice["profile"]
+        path = self._artifact(profile["reference_artifact_path"])
+        validate_wave(path)
+        if self.store.sha256(path) != profile["reference_sha256"]:
+            raise RuntimeError("Voice reference failed hash validation")
+        return self._respond(start_response, "200 OK", path.read_bytes(), "audio/wav")
+
     def _layout(self, title: str, body: str, environ: dict[str, object], refresh: bool = False) -> str:
         query = parse_qs(str(environ.get("QUERY_STRING", "")))
         notice = query.get("notice", [""])[0]
+        path = str(environ.get("PATH_INFO", "/"))
         refresh_tag = '<meta http-equiv="refresh" content="4">' if refresh else ""
         notice_html = f'<div class="notice">{self._e(notice)}</div>' if notice else ""
-        return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{self._e(title)} · Narranova</title>{refresh_tag}<link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/choices.css"></head><body><header class="topbar"><a class="brand" href="/"><span>N</span><strong>Narranova</strong></a><div class="top-note">EPUB → spoken edition</div></header><div class="shell">{notice_html}{body}</div><footer>Local-first audiobook production · MOSS stays external</footer></body></html>"""
+        nav = (
+            ("/", "Library", path == "/" or path.startswith("/books/") or path.startswith("/jobs/")),
+            ("/voices", "Voices", path.startswith("/voices")),
+            ("/connections", "Connections", path.startswith("/connections")),
+        )
+        nav_html = "".join(
+            f'<a href="{href}" class="{"active" if active else ""}">{label}</a>'
+            for href, label, active in nav
+        )
+        return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{self._e(title)} · Narranova</title>{refresh_tag}<link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/choices.css"><script defer src="/static/app.js"></script></head><body><header class="topbar"><div class="topbar-inner"><a class="brand" href="/"><span>N</span><strong>Narranova</strong></a><nav aria-label="Primary navigation">{nav_html}</nav><div class="top-note"><i></i>Local studio</div></div></header><div class="shell">{notice_html}{body}</div><footer>Narranova · Local-first audiobook production · MOSS stays external</footer></body></html>"""
 
     def _parse_form(self, environ: dict[str, object]) -> tuple[dict[str, str], dict[str, Upload]]:
         try:
@@ -476,7 +704,11 @@ class NarranovaWebApp:
                 ("Content-Length", str(len(content))),
                 ("X-Content-Type-Options", "nosniff"),
                 ("Referrer-Policy", "same-origin"),
-                ("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self'"),
+                (
+                    "Content-Security-Policy",
+                    "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                    "script-src 'self'; media-src 'self'",
+                ),
             ]
         )
         start_response(status, response_headers)
@@ -493,6 +725,7 @@ def create_web_app(data_dir: str | Path | None = None) -> NarranovaWebApp:
     generation = GenerationRepository(database)
     store = ArtifactStore(settings.data_dir)
     jobs = GenerationJobs(books, generation, layout, store)
+    profiles = VoiceProfiles(generation, layout, store)
     return NarranovaWebApp(
         settings,
         books,
@@ -501,7 +734,8 @@ def create_web_app(data_dir: str | Path | None = None) -> NarranovaWebApp:
         store,
         ImportBook(EpubParser(), books, layout, store),
         ReviseNarrationPlan(books, layout, store),
-        VoiceProfiles(generation, layout, store),
+        profiles,
         jobs,
         DeleteArtifacts(books, generation, layout),
+        VoiceStudio(books, generation, profiles, layout, store),
     )

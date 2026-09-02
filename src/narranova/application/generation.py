@@ -46,6 +46,7 @@ class VoiceProfiles:
         provider_id: str,
         reference_audio: Path,
         instruction: str,
+        name: str | None = None,
         language: str = "English",
     ) -> str:
         if not instruction.strip():
@@ -54,10 +55,14 @@ class VoiceProfiles:
             raise FileNotFoundError(f"Reference audio not found: {reference_audio}")
         validate_wave(reference_audio)
         profile_id = uuid.uuid4().hex
+        profile_name = (name or "Narrator profile").strip()
+        if not profile_name:
+            raise ValueError("Voice profile name cannot be empty")
         destination = self.layout.voice_reference(book_id, profile_id)
         reference_hash = self.store.copy(reference_audio, destination)
         profile: dict[str, object] = {
             "kind": "openmoss",
+            "name": profile_name,
             "instruction": instruction.strip(),
             "language": language,
             "reference_artifact_path": destination.relative_to(self.layout.root).as_posix(),
@@ -94,10 +99,17 @@ class GenerationJobs:
         self.store = store
         self.provider_factory = provider_factory or self._openmoss_provider
 
-    def create(self, book_id: str, voice_profile_id: str) -> str:
+    def create(
+        self,
+        book_id: str,
+        voice_profile_id: str,
+        provider_id: str | None = None,
+    ) -> str:
         voice = self.generation.get_voice_and_provider(voice_profile_id)
         if voice["book_id"] != book_id:
             raise ValueError("Voice profile belongs to a different book")
+        if provider_id is not None and voice["provider_id"] != provider_id:
+            raise ValueError("Voice profile does not belong to the selected TTS connection")
         plan_record = self.books.get_plan_record(book_id)
         plan_path = self._artifact_path(plan_record["artifact_path"])
         if self.store.sha256(plan_path) != plan_record["plan_sha256"]:

@@ -84,8 +84,13 @@ PYTHONPATH=src python -m narranova web --data-dir ./data
 ```
 
 Open `http://127.0.0.1:8787`. The web interface supports EPUB upload, library
-and narration-plan review, per-section narration inclusion, OpenMOSS endpoint
-registration, approved reference voice profiles, durable job creation,
+and narration-plan review, per-section narration inclusion, a dedicated TTS
+connections page, and a Voice Studio for comparing short OpenMOSS auditions.
+Voice Studio pairs an uploaded or previously saved reference with editable
+narration directions and test sentences. Users can regenerate takes, promote a
+chosen take into a named profile, and then select both the connection and voice
+profile on the separate narration setup page. Saving a profile removes its
+discarded draft audio. The interface also supports durable job creation,
 background generation, pause/resume, status, and verified chunk playback.
 Saving section choices creates an immutable plan revision; existing jobs retain
 their original plan and new jobs use the latest revision. The server binds to

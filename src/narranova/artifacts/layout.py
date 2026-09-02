@@ -32,6 +32,10 @@ class ArtifactLayout:
     def temporary_root(self) -> Path:
         return self.root / "tmp"
 
+    @property
+    def voice_studio_root(self) -> Path:
+        return self.temporary_root / "voice-studio"
+
     def initialize(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.books_root.mkdir(exist_ok=True)
@@ -67,3 +71,16 @@ class ArtifactLayout:
     def job_chunk_master(self, book_id: str, job_id: str, chunk_id: str) -> Path:
         safe_chunk_id = _validate_id(chunk_id, "chunk id")
         return self.job_root(book_id, job_id) / "chunks" / f"{safe_chunk_id}.wav"
+
+    def voice_studio_draft(self, draft_id: str) -> Path:
+        return self.voice_studio_root / _validate_id(draft_id, "voice studio draft id")
+
+    def voice_studio_manifest(self, draft_id: str) -> Path:
+        return self.voice_studio_draft(draft_id) / "draft.json"
+
+    def voice_studio_upload(self, draft_id: str) -> Path:
+        return self.voice_studio_draft(draft_id) / "uploaded-reference.wav"
+
+    def voice_studio_take(self, draft_id: str, take_id: str) -> Path:
+        safe_take_id = _validate_id(take_id, "voice studio take id")
+        return self.voice_studio_draft(draft_id) / "takes" / f"{safe_take_id}.wav"

@@ -76,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     voice_parser.add_argument("provider_id")
     voice_parser.add_argument("--reference", required=True, help="approved reference WAV")
     voice_parser.add_argument("--instruction", required=True, help="narrator instruction")
+    voice_parser.add_argument("--name", default="Narrator profile", help="voice profile name")
     voice_parser.add_argument("--language", default="English")
     voice_parser.add_argument("--data-dir", help="persistent data directory")
 
@@ -166,6 +167,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 provider_id=args.provider_id,
                 reference_audio=Path(args.reference).expanduser().resolve(),
                 instruction=args.instruction,
+                name=args.name,
                 language=args.language,
             )
             print(f"Created OpenMOSS voice profile {profile_id}")
