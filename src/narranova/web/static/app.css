@@ -151,7 +151,7 @@ h3 { margin: 0; font-size: 16px; }
   border-bottom: 1px solid var(--line);
 }
 .count { color: #aaa59a; font: 400 34px/1 Georgia, serif; }
-.dashboard-grid, .book-grid, .settings-grid, .narration-grid {
+.dashboard-grid, .book-grid, .narration-grid {
   display: grid;
   grid-template-columns: minmax(0,1.55fr) minmax(320px,.8fr);
   gap: 24px;
@@ -263,6 +263,15 @@ h3 { margin: 0; font-size: 16px; }
 }
 .section-heading p:not(.eyebrow) { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
 .connection-list, .voice-list, .take-list { display: grid; gap: 12px; }
+.connections-stack { display: grid; gap: 36px; }
+.connection-builder form {
+  display: grid;
+  grid-template-columns: minmax(180px,.7fr) minmax(220px,1fr) minmax(320px,1.45fr) auto;
+  align-items: end;
+  gap: 18px;
+  padding: 24px;
+}
+.connection-builder button { margin-bottom: 0; white-space: nowrap; }
 .connection-card {
   display: grid;
   grid-template-columns: 58px minmax(0,1fr);
@@ -692,9 +701,11 @@ audio { width: 100%; height: 36px; }
 footer { padding: 26px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; letter-spacing: .1em; text-align: center; text-transform: uppercase; }
 
 @media (max-width: 920px) {
-  .dashboard-grid, .book-grid, .settings-grid,
+  .dashboard-grid, .book-grid,
   .narration-grid, .studio-grid, .jobs-grid { grid-template-columns: 1fr; }
   .form-card, .save-profile { position: static; }
+  .connection-builder form { grid-template-columns: 1fr 1fr; }
+  .connection-builder label:last-of-type { grid-column: 1 / -1; }
   .topbar-inner { grid-template-columns: 1fr auto; }
 }
 @media (max-width: 680px) {
@@ -712,6 +723,9 @@ footer { padding: 26px; border-top: 1px solid var(--line); color: var(--muted); 
   .stat-strip a:nth-child(2) { border-right: 0; }
   .stat-strip a:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
   .prompt-grid, .audition-form > .form-row { grid-template-columns: 1fr; }
+  .connection-builder form { grid-template-columns: 1fr; }
+  .connection-builder label:last-of-type { grid-column: auto; }
+  .connection-builder button { width: 100%; }
   .start-studio { grid-template-columns: 1fr; justify-items: start; }
   .start-studio form, .start-studio form button { width: 100%; }
   .audition-form > .form-row, .audition-form > fieldset, .audition-form > button { margin-right: 16px; margin-left: 16px; }

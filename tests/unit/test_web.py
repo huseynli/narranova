@@ -233,6 +233,11 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(status, "200 OK")
             self.assertIn(b"Connect your voice engine", connections)
             self.assertIn(b'class="page-heading full-page-heading"', connections)
+            self.assertIn(b'class="connections-stack"', connections)
+            self.assertLess(
+                connections.index(b"Add a TTS engine"),
+                connections.index(b"Saved connections"),
+            )
             self.assertIn(b'action="/connections"', connections)
             self.assertIn(b'name="kind"', connections)
 
