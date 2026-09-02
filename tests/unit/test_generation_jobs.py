@@ -105,16 +105,108 @@ class GenerationJobTests(unittest.TestCase):
             self.assertEqual(repaired.attempts, 2)
             self.assertEqual(len(fake.requests), len(chunks) + 1)
 
+            generation.fail_chunk(job_id, repaired.database_id, "Previous attempt failed")
+            self.assertEqual(
+                generation.get_job(job_id)["error_message"],
+                "Previous attempt failed",
+            )
+            requests_before_retry = len(fake.requests)
+            jobs.prepare(job_id)
+            prepared = generation.get_job(job_id)
+            self.assertEqual(prepared["status"], "generating")
+            self.assertIsNone(prepared["error_message"])
+            jobs.run(job_id, prepared=True)
+            self.assertEqual(generation.get_job(job_id)["status"], "completed")
+            self.assertEqual(len(fake.requests), requests_before_retry + 1)
+
+            alternate_profile_id = profiles.create_openmoss_profile(
+                provider_id=provider_id,
+                reference_audio=reference,
+                instruction="A distinctly different narrator.",
+                name="Alternate narrator",
+            )
+            alternate_job_id = jobs.create(imported.book_id, alternate_profile_id)
+            alternate_chunks = generation.list_chunks(alternate_job_id)
+            self.assertEqual(generation.get_job(alternate_job_id)["status"], "ready")
+            self.assertTrue(all(chunk.status == "pending" for chunk in alternate_chunks))
+            self.assertTrue(
+                all(chunk.audio_artifact_path is None for chunk in alternate_chunks)
+            )
+            requests_before_alternate_run = len(fake.requests)
+            jobs.run(alternate_job_id)
+            self.assertEqual(
+                len(fake.requests), requests_before_alternate_run + len(alternate_chunks)
+            )
+            self.assertTrue(
+                {
+                    chunk.audio_artifact_path
+                    for chunk in generation.list_chunks(job_id)
+                }.isdisjoint(
+                    {
+                        chunk.audio_artifact_path
+                        for chunk in generation.list_chunks(alternate_job_id)
+                    }
+                )
+            )
+
             ReviseNarrationPlan(books, layout, store).execute(imported.book_id, {2})
             revised_job_id = jobs.create(imported.book_id, profile_id)
             revised_chunks = generation.list_chunks(revised_job_id)
             requests_before_revised_run = len(fake.requests)
 
             self.assertEqual([chunk.id for chunk in revised_chunks], ["c0002-p0001"])
-            self.assertEqual(revised_chunks[0].status, "completed")
+            self.assertEqual(revised_chunks[0].status, "pending")
             self.assertEqual(revised_chunks[0].attempts, 0)
             jobs.run(revised_job_id)
-            self.assertEqual(len(fake.requests), requests_before_revised_run)
+            self.assertEqual(len(fake.requests), requests_before_revised_run + 1)
+
+    def test_legacy_zero_attempt_audio_is_removed_and_job_is_reopened(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            source = root / "book.epub"
+            reference = root / "reference.wav"
+            make_epub(source)
+            make_wave(reference)
+            layout = ArtifactLayout.at(data)
+            layout.initialize()
+            store = ArtifactStore(data)
+            database = Database(data / "narranova.sqlite3")
+            database.initialize()
+            books = BookRepository(database)
+            generation = GenerationRepository(database)
+            imported = ImportBook(EpubParser(), books, layout, store).execute(source)
+            profiles = VoiceProfiles(generation, layout, store)
+            provider_id = profiles.add_openmoss_provider(
+                "Test MOSS", "http://moss.test:8000/tts"
+            )
+            profile_id = profiles.create_openmoss_profile(
+                provider_id=provider_id,
+                reference_audio=reference,
+                instruction="A fresh narrator.",
+                name="Fresh narrator",
+            )
+            jobs = GenerationJobs(books, generation, layout, store)
+            job_id = jobs.create(imported.book_id, profile_id)
+            chunk = generation.list_chunks(job_id)[0]
+            copied_audio = layout.job_chunk_master(imported.book_id, job_id, chunk.id)
+            make_wave(copied_audio)
+            generation.complete_chunk(
+                job_id,
+                chunk.database_id,
+                copied_audio.relative_to(data).as_posix(),
+                store.sha256(copied_audio),
+                0.01,
+            )
+            generation.complete_job(job_id)
+
+            GenerationJobs(books, generation, layout, store)
+
+            repaired = generation.list_chunks(job_id)[0]
+            self.assertEqual(generation.get_job(job_id)["status"], "ready")
+            self.assertEqual(repaired.status, "pending")
+            self.assertIsNone(repaired.audio_artifact_path)
+            self.assertFalse(copied_audio.exists())
 
     def test_interrupted_chunk_returns_to_pending_before_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

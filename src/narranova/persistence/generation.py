@@ -55,10 +55,10 @@ class StoredJob:
 
 
 @dataclass(frozen=True)
-class ReusableChunk:
+class UnattemptedCompletedChunk:
+    job_id: str
+    database_id: str
     audio_artifact_path: str
-    audio_sha256: str
-    duration_seconds: float
 
 
 class GenerationRepository:
@@ -222,30 +222,17 @@ class GenerationRepository:
             raise KeyError(f"Chunk not found: {chunk_id}")
         return StoredChunk(**dict(row))
 
-    def find_reusable_chunk(
-        self,
-        *,
-        book_id: str,
-        excluding_job_id: str,
-        logical_id: str,
-        text_sha256: str,
-    ) -> ReusableChunk | None:
+    def list_unattempted_completed_chunks(self) -> list[UnattemptedCompletedChunk]:
         with self.database.connect() as connection:
-            row = connection.execute(
+            rows = connection.execute(
                 """
-                SELECT c.audio_artifact_path, c.audio_sha256, c.duration_seconds
+                SELECT c.job_id, c.id AS database_id, c.audio_artifact_path
                 FROM chunks c
-                JOIN jobs j ON j.id = c.job_id
-                WHERE j.book_id = ? AND j.id != ? AND c.logical_id = ?
-                  AND c.text_sha256 = ? AND c.status = 'completed'
+                WHERE c.status = 'completed' AND c.attempts = 0
                   AND c.audio_artifact_path IS NOT NULL
-                  AND c.audio_sha256 IS NOT NULL
-                  AND c.duration_seconds IS NOT NULL
-                ORDER BY c.updated_at DESC LIMIT 1
                 """,
-                (book_id, excluding_job_id, logical_id, text_sha256),
-            ).fetchone()
-        return ReusableChunk(**dict(row)) if row else None
+            ).fetchall()
+        return [UnattemptedCompletedChunk(**dict(row)) for row in rows]
 
     def add_voice_profile(
         self,
@@ -534,6 +521,23 @@ class GenerationRepository:
                 (job_id,),
             )
 
+    def start_job(self, job_id: str) -> None:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs SET status = 'generating', error_message = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status IN ('ready', 'failed', 'completed')
+                """,
+                (job_id,),
+            )
+        if cursor.rowcount != 1:
+            status = self.job_status(job_id)
+            if status != "generating":
+                raise ValueError(
+                    "Only ready, failed, paused, or completed jobs can be started"
+                )
+
     def begin_chunk(self, job_id: str, chunk_id: str) -> None:
         with self.database.connect() as connection:
             connection.execute(
@@ -594,6 +598,16 @@ class GenerationRepository:
                 WHERE job_id = ? AND id = ?
                 """,
                 (job_id, chunk_id),
+            )
+            connection.execute(
+                """
+                UPDATE jobs SET status = CASE
+                    WHEN status = 'completed' THEN 'ready'
+                    ELSE status END,
+                    error_message = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (job_id,),
             )
 
     def complete_job(self, job_id: str) -> None:

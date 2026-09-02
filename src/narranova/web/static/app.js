@@ -49,6 +49,104 @@ if (themeToggle) {
   });
 }
 
+const jobMonitor = document.querySelector("[data-job-monitor]");
+
+function setJobControl(name, visible) {
+  const control = document.querySelector(`[data-job-${name}]`);
+  if (control) control.hidden = !visible;
+}
+
+function addChunkActions(jobId, chunkId, container) {
+  if (container.querySelector("audio")) return;
+  const base = `/jobs/${encodeURIComponent(jobId)}/chunks/${encodeURIComponent(chunkId)}`;
+  const audio = document.createElement("audio");
+  audio.controls = true;
+  audio.preload = "none";
+  audio.src = `${base}/audio`;
+
+  const links = document.createElement("span");
+  links.className = "chunk-action-links";
+  const download = document.createElement("a");
+  download.className = "chunk-download";
+  download.href = `${base}/download`;
+  download.textContent = "Download";
+  const remove = document.createElement("a");
+  remove.className = "danger-link";
+  remove.href = `${base}/delete`;
+  remove.textContent = "Delete";
+  links.append(download, remove);
+  container.append(audio, links);
+}
+
+function updateJobPage(state) {
+  const status = String(state.status || "ready");
+  const statusLabel = document.querySelector("[data-job-status]");
+  if (statusLabel) {
+    statusLabel.textContent = status;
+    statusLabel.className = `status status-${status.replace(/[^a-z_]/g, "")}`;
+  }
+  const summary = document.querySelector("[data-job-summary]");
+  if (summary) summary.textContent = `${state.completed} of ${state.total} chunks complete`;
+  const percent = document.querySelector("[data-job-percent]");
+  if (percent) percent.textContent = `${state.percent}%`;
+  const progress = document.querySelector("[data-job-progress-bar]");
+  if (progress) progress.style.width = `${state.percent}%`;
+
+  const error = document.querySelector("[data-job-error]");
+  if (error) {
+    error.textContent = state.error || "";
+    error.hidden = !state.error;
+  }
+
+  const startable = ["ready", "failed", "paused"].includes(status);
+  setJobControl("start", startable);
+  setJobControl("running", ["generating", "assembling"].includes(status));
+  setJobControl("pause", status === "generating");
+  setJobControl("pause-requested", status === "pause_requested");
+  setJobControl("complete", status === "completed");
+  const startLabel = document.querySelector("[data-job-start-label]");
+  if (startLabel) {
+    startLabel.textContent = ["failed", "paused"].includes(status)
+      ? "Resume generation"
+      : "Start generation";
+  }
+
+  state.chunks.forEach((chunk) => {
+    const row = document.querySelector(`[data-chunk-id="${chunk.id}"]`);
+    if (!row) return;
+    const chunkStatus = row.querySelector("[data-chunk-status]");
+    if (chunkStatus) chunkStatus.textContent = chunk.status;
+    const metadata = row.querySelector("[data-chunk-meta]");
+    if (metadata) {
+      const attempts = `${chunk.attempts} attempt${chunk.attempts === 1 ? "" : "s"}`;
+      const duration = chunk.duration ? ` · ${Number(chunk.duration).toFixed(1)}s` : "";
+      metadata.textContent = attempts + duration;
+    }
+    if (chunk.status === "completed") {
+      const actions = row.querySelector("[data-chunk-actions]");
+      if (actions) addChunkActions(jobMonitor.dataset.jobId, chunk.id, actions);
+    }
+  });
+  return ["generating", "pause_requested", "assembling"].includes(status);
+}
+
+if (jobMonitor) {
+  const pollJob = async () => {
+    try {
+      const response = await fetch(
+        `/jobs/${encodeURIComponent(jobMonitor.dataset.jobId)}/status`,
+        { cache: "no-store", headers: { Accept: "application/json" } }
+      );
+      if (!response.ok) throw new Error("Job status request failed");
+      const active = updateJobPage(await response.json());
+      if (active) window.setTimeout(pollJob, 2000);
+    } catch (error) {
+      window.setTimeout(pollJob, 4000);
+    }
+  };
+  window.setTimeout(pollJob, 900);
+}
+
 document.querySelectorAll("[data-instruction]").forEach((button) => {
   button.addEventListener("click", () => {
     const field = document.querySelector("#instruction");

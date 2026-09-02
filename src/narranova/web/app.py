@@ -57,6 +57,12 @@ class JobSupervisor:
             if job_id in self._active:
                 return False
             self._active.add(job_id)
+        try:
+            self.jobs.prepare(job_id)
+        except Exception:
+            with self._lock:
+                self._active.discard(job_id)
+            raise
         thread = threading.Thread(target=self._run, args=(job_id,), daemon=True)
         thread.start()
         return True
@@ -67,7 +73,7 @@ class JobSupervisor:
 
     def _run(self, job_id: str) -> None:
         try:
-            self.jobs.run(job_id)
+            self.jobs.run(job_id, prepared=True)
         except Exception:
             # The job engine records provider failures durably for the UI.
             pass
@@ -220,6 +226,8 @@ class NarranovaWebApp:
                 return self._html(start_response, self._book(parts[1], environ, csrf), set_cookie)
             if method == "GET" and len(parts) == 2 and parts[0] == "jobs":
                 return self._html(start_response, self._job(parts[1], environ, csrf), set_cookie)
+            if method == "GET" and len(parts) == 3 and parts[0] == "jobs" and parts[2] == "status":
+                return self._job_state(start_response, parts[1])
             if method == "GET" and len(parts) == 3 and parts[0] == "books" and parts[2] == "delete":
                 book = self.books.get_book(parts[1])
                 return self._html(
@@ -689,14 +697,47 @@ class NarranovaWebApp:
         completed = sum(chunk.status == "completed" for chunk in chunks)
         percent = round((completed / len(chunks)) * 100) if chunks else 0
         chunk_rows = "".join(
-            f"""<article class="chunk-row"><div><span class="mono">{self._e(chunk.id)}</span><strong>{self._e(chunk.status)}</strong><small>{chunk.attempts} attempt{'s' if chunk.attempts != 1 else ''}{f' · {chunk.duration_seconds:.1f}s' if chunk.duration_seconds else ''}</small></div><div class="chunk-actions">{f'<audio controls preload="none" src="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/audio"></audio><span class="chunk-action-links"><a class="chunk-download" href="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/download">Download</a><a class="danger-link" href="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/delete">Delete</a></span>' if chunk.status == 'completed' else ''}</div></article>"""
+            f"""<article class="chunk-row" data-chunk-id="{self._e(chunk.database_id)}"><div><span class="mono">{self._e(chunk.id)}</span><strong data-chunk-status>{self._e(chunk.status)}</strong><small data-chunk-meta>{chunk.attempts} attempt{'s' if chunk.attempts != 1 else ''}{f' · {chunk.duration_seconds:.1f}s' if chunk.duration_seconds else ''}</small></div><div class="chunk-actions" data-chunk-actions>{f'<audio controls preload="none" src="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/audio"></audio><span class="chunk-action-links"><a class="chunk-download" href="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/download">Download</a><a class="danger-link" href="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/delete">Delete</a></span>' if chunk.status == 'completed' else ''}</div></article>"""
             for chunk in chunks
         )
-        error = f'<div class="alert">{self._e(job.get("error_message") or "")}</div>' if job.get("error_message") else ""
-        controls = f"""<form method="post" action="/jobs/{self._e(job_id)}/run">{self._csrf(csrf)}<button class="primary">{'Resume' if job['status'] in {'failed', 'paused'} else 'Start generation'}</button></form><form method="post" action="/jobs/{self._e(job_id)}/pause">{self._csrf(csrf)}<button>Pause after chunk</button></form>""" if job["status"] != "completed" else '<span class="complete-mark">✓ Generation complete</span>'
-        controls += f'<a class="danger-link job-delete" href="/jobs/{self._e(job_id)}/delete">Delete job</a>'
-        body = f"""<a class="back" href="/books/{self._e(job['book_id'])}">← Back to book</a><section class="job-head full-page-heading"><div><p class="eyebrow">Generation job</p><h1>{self._e(job_id[:12])}</h1><p>{completed} of {len(chunks)} chunks complete</p></div><span class="status status-{self._e(job['status'])}">{self._e(job['status'])}</span></section>{error}<section class="panel progress-panel"><div class="progress-copy"><strong>{percent}%</strong><span>verified audio</span></div><div class="progress"><i style="width:{percent}%"></i></div><div class="job-actions">{controls}</div></section><section class="panel chunks"><header><div><p class="eyebrow">Artifacts</p><h2>Audio chunks</h2></div><span class="count">{len(chunks):02d}</span></header>{chunk_rows}</section>"""
-        return self._layout("Generation", body, environ, refresh=job["status"] in {"generating", "pause_requested"})
+        status = str(job["status"])
+        startable = status in {"ready", "failed", "paused"}
+        start_label = "Resume generation" if status in {"failed", "paused"} else "Start generation"
+        controls = f"""<form method="post" action="/jobs/{self._e(job_id)}/run" data-job-start{' hidden' if not startable else ''}>{self._csrf(csrf)}<button class="primary" data-job-start-label>{start_label}</button></form><span class="running-mark" data-job-running{' hidden' if status not in {'generating', 'assembling'} else ''}><i></i>Generation in progress</span><form method="post" action="/jobs/{self._e(job_id)}/pause" data-job-pause{' hidden' if status != 'generating' else ''}>{self._csrf(csrf)}<button>Pause after chunk</button></form><span class="pause-mark" data-job-pause-requested{' hidden' if status != 'pause_requested' else ''}>Pause requested · finishing current chunk</span><span class="complete-mark" data-job-complete{' hidden' if status != 'completed' else ''}>✓ Generation complete</span><a class="danger-link job-delete" href="/jobs/{self._e(job_id)}/delete">Delete job</a>"""
+        error_message = str(job.get("error_message") or "")
+        error = f'<div class="alert" data-job-error{"" if error_message else " hidden"}>{self._e(error_message)}</div>'
+        body = f"""<a class="back" href="/books/{self._e(job['book_id'])}">← Back to book</a><section class="job-head full-page-heading"><div><p class="eyebrow">Generation job</p><h1>{self._e(job_id[:12])}</h1><p data-job-summary>{completed} of {len(chunks)} chunks complete</p></div><span class="status status-{self._e(status)}" data-job-status>{self._e(status)}</span></section>{error}<section class="panel progress-panel" data-job-monitor data-job-id="{self._e(job_id)}"><div class="progress-copy"><strong data-job-percent>{percent}%</strong><span>verified audio</span></div><div class="progress"><i data-job-progress-bar style="width:{percent}%"></i></div><div class="job-actions">{controls}</div></section><section class="panel chunks"><header><div><p class="eyebrow">Artifacts</p><h2>Audio chunks</h2></div><span class="count">{len(chunks):02d}</span></header>{chunk_rows}</section>"""
+        return self._layout("Generation", body, environ)
+
+    def _job_state(self, start_response: StartResponse, job_id: str) -> Iterable[bytes]:
+        job = self.generation.get_job(job_id)
+        chunks = self.generation.list_chunks(job_id)
+        completed = sum(chunk.status == "completed" for chunk in chunks)
+        percent = round((completed / len(chunks)) * 100) if chunks else 0
+        content = json.dumps(
+            {
+                "status": job["status"],
+                "error": job.get("error_message") or "",
+                "completed": completed,
+                "total": len(chunks),
+                "percent": percent,
+                "chunks": [
+                    {
+                        "id": chunk.database_id,
+                        "status": chunk.status,
+                        "attempts": chunk.attempts,
+                        "duration": chunk.duration_seconds,
+                    }
+                    for chunk in chunks
+                ],
+            }
+        ).encode("utf-8")
+        return self._respond(
+            start_response,
+            "200 OK",
+            content,
+            "application/json; charset=utf-8",
+        )
 
     def _confirm(
         self,

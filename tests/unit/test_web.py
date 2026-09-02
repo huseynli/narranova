@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -99,6 +100,9 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(status, "200 OK")
             self.assertIn(b'localStorage.setItem("narranova-theme"', script)
             self.assertIn(b"narranova_theme=", script)
+            self.assertIn(b"data-job-monitor", script)
+            self.assertIn(b"window.setTimeout(pollJob", script)
+            self.assertNotIn(b"location.reload", script)
             self.assertIn(("Content-Type", "text/javascript; charset=utf-8"), headers)
 
             status, headers, bootstrap = request(app, "/static/theme.js")
@@ -460,14 +464,28 @@ class WebAppTests(unittest.TestCase):
                 app.store.sha256(audio_path),
                 0.01,
             )
+            app.generation.start_job(job_id)
 
             download_path = f"/jobs/{job_id}/chunks/{chunk.database_id}/download"
             status, _, job_page = request(app, f"/jobs/{job_id}")
             self.assertEqual(status, "200 OK")
+            self.assertNotIn(b'http-equiv="refresh"', job_page)
+            self.assertIn(b"data-job-monitor", job_page)
+            self.assertIn(b"Generation in progress", job_page)
+            self.assertIn(b"data-job-start hidden", job_page)
+            self.assertIn(b"data-job-pause", job_page)
             self.assertIn(download_path.encode(), job_page)
             self.assertIn(b'class="chunk-action-links"', job_page)
             self.assertIn(b">Download</a>", job_page)
             self.assertIn(b">Delete</a>", job_page)
+
+            status, headers, state_body = request(app, f"/jobs/{job_id}/status")
+            self.assertEqual(status, "200 OK")
+            self.assertIn(("Content-Type", "application/json; charset=utf-8"), headers)
+            state = json.loads(state_body)
+            self.assertEqual(state["status"], "generating")
+            self.assertEqual(state["completed"], 1)
+            self.assertEqual(state["percent"], 50)
 
             status, headers, audio = request(app, download_path)
             self.assertEqual(status, "200 OK")

@@ -226,6 +226,7 @@ class GenerationJobs:
         self.store = store
         self.provider_factory = provider_factory or self._openmoss_provider
         self._materialize_job_voice_references()
+        self._reset_legacy_reused_chunks()
 
     def create(
         self,
@@ -305,13 +306,18 @@ class GenerationJobs:
         except Exception:
             shutil.rmtree(self.layout.job_root(book_id, job_id), ignore_errors=True)
             raise
-        self._reuse_verified_chunks(book_id, job_id)
         return job_id
 
-    def run(self, job_id: str) -> None:
-        job = self.generation.get_job(job_id)
+    def prepare(self, job_id: str) -> None:
+        """Put a job into a visible running state before background execution."""
         self.generation.resume(job_id)
         self.generation.recover_interrupted(job_id)
+        self.generation.start_job(job_id)
+
+    def run(self, job_id: str, *, prepared: bool = False) -> None:
+        if not prepared:
+            self.prepare(job_id)
+        job = self.generation.get_job(job_id)
         profile = job["profile"]
         if hashlib.sha256(_canonical_json(profile).encode("utf-8")).hexdigest() != job[
             "profile_sha256"
@@ -409,35 +415,19 @@ class GenerationJobs:
         except (OSError, ValueError):
             return False
 
-    def _reuse_verified_chunks(self, book_id: str, job_id: str) -> None:
-        for chunk in self.generation.list_chunks(job_id):
-            reusable = self.generation.find_reusable_chunk(
-                book_id=book_id,
-                excluding_job_id=job_id,
-                logical_id=chunk.id,
-                text_sha256=chunk.text_sha256,
-            )
-            if reusable is None:
-                continue
-            source = self._artifact_path(reusable.audio_artifact_path)
-            destination = self.layout.job_chunk_master(book_id, job_id, chunk.id)
+    def _reset_legacy_reused_chunks(self) -> None:
+        """Remove cross-job copies created without a synthesis attempt.
+
+        Older builds reused audio by book text alone, which could attach a previous
+        narrator's output to a new job. Genuine synthesis always increments attempts
+        before completion, so zero-attempt completed chunks identify those copies.
+        """
+        for chunk in self.generation.list_unattempted_completed_chunks():
             try:
-                validate_wave(source)
-                if self.store.sha256(source) != reusable.audio_sha256:
-                    continue
-                copied_hash = self.store.copy(source, destination)
-                if copied_hash != reusable.audio_sha256:
-                    destination.unlink(missing_ok=True)
-                    continue
-                self.generation.complete_chunk(
-                    job_id,
-                    chunk.database_id,
-                    destination.relative_to(self.layout.root).as_posix(),
-                    copied_hash,
-                    reusable.duration_seconds,
-                )
-            except (OSError, RuntimeError, ValueError):
-                destination.unlink(missing_ok=True)
+                self._artifact_path(chunk.audio_artifact_path).unlink(missing_ok=True)
+            except (OSError, RuntimeError):
+                pass
+            self.generation.reset_chunk(chunk.job_id, chunk.database_id)
 
     def _completed_chunk_is_valid(self, chunk: object) -> bool:
         if not chunk.audio_artifact_path or not chunk.audio_sha256:
