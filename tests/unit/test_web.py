@@ -52,6 +52,26 @@ class WebAppTests(unittest.TestCase):
             self.assertNotIn(b"Prepare your studio", body)
             self.assertTrue(any(name == "Set-Cookie" for name, _ in headers))
 
+    def test_jobs_workspace_has_requested_navigation_and_status_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = create_web_app(Path(temporary) / "data")
+
+            status, _, body = request(app, "/jobs")
+
+            self.assertEqual(status, "200 OK")
+            self.assertIn(b"Every narration run in one place", body)
+            for label in (b"Active", b"Recent", b"Finished", b"Stopped"):
+                self.assertIn(label, body)
+            self.assertNotIn(b"Local studio", body)
+            self.assertNotIn(b"MOSS stays external", body)
+            nav = [
+                body.index(b">Library</a>"),
+                body.index(b">Connections</a>"),
+                body.index(b">Voices</a>"),
+                body.index(b">Jobs</a>"),
+            ]
+            self.assertEqual(nav, sorted(nav))
+
     def test_static_stylesheet_is_packaged(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             app = create_web_app(Path(temporary) / "data")

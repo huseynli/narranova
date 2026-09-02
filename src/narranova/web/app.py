@@ -130,6 +130,8 @@ class NarranovaWebApp:
                 return self._html(start_response, self._connections(environ, csrf), set_cookie)
             if method == "GET" and parts == ["voices"]:
                 return self._html(start_response, self._voices(environ, csrf), set_cookie)
+            if method == "GET" and parts == ["jobs"]:
+                return self._html(start_response, self._jobs(environ, csrf), set_cookie)
             if (
                 method == "GET"
                 and len(parts) == 3
@@ -436,7 +438,7 @@ class NarranovaWebApp:
           <form class="import-card" method="post" action="/actions/import" enctype="multipart/form-data">
             {self._csrf(csrf)}<label for="epub">Add a DRM-free EPUB</label><div><input id="epub" name="epub" type="file" accept=".epub,application/epub+zip" required><button class="primary">Import book</button></div>
           </form></section>
-        <section class="stat-strip"><a href="/"><strong>{len(books)}</strong><span>Books</span></a><a href="/connections"><strong>{len(providers)}</strong><span>TTS connections</span></a><a href="/voices"><strong>{len(profiles)}</strong><span>Voice profiles</span></a><a href="#recent-jobs"><strong>{len(jobs)}</strong><span>Recent jobs</span></a></section>
+        <section class="stat-strip"><a href="/"><strong>{len(books)}</strong><span>Books</span></a><a href="/connections"><strong>{len(providers)}</strong><span>TTS connections</span></a><a href="/voices"><strong>{len(profiles)}</strong><span>Voice profiles</span></a><a href="/jobs"><strong>{len(jobs)}</strong><span>Recent jobs</span></a></section>
         <div class="dashboard-grid"><section class="panel library"><header><div><p class="eyebrow">Library</p><h2>Books in progress</h2></div><span class="count">{len(books):02d}</span></header>{book_cards}</section>
         <aside class="stack"><section class="panel" id="recent-jobs"><header><div><p class="eyebrow">Activity</p><h2>Recent jobs</h2></div></header>{job_rows}</section></aside></div>"""
         return self._layout("Workspace", body, environ)
@@ -455,6 +457,35 @@ class NarranovaWebApp:
         <div class="settings-grid"><main><div class="section-heading"><div><h2>Saved connections</h2><p>{len(providers)} configured</p></div></div><div class="connection-list">{cards}</div></main>
         <aside class="panel form-card"><header><div><p class="eyebrow">New connection</p><h2>Add a TTS engine</h2></div></header><form method="post" action="/connections">{self._csrf(csrf)}<label>Connection type<small>Each engine exposes its own Voice Lab controls.</small><select name="kind" required>{type_options}</select></label><label>Connection name<small>Use a name that identifies the machine or model.</small><input name="name" placeholder="Studio MOSS" required></label><label>Service endpoint<small>For OpenMOSS, enter its external /tts URL.</small><input name="endpoint" type="url" value="http://127.0.0.1:8000/tts" required></label><button class="primary">Save connection</button></form></aside></div>"""
         return self._layout("Connections", body, environ)
+
+    def _jobs(self, environ: dict[str, object], csrf: str) -> str:
+        """Render the cross-book generation job workspace."""
+        jobs = self.generation.list_jobs()
+        active_statuses = {"generating", "pause_requested", "assembling"}
+        recent_statuses = {"uploaded", "planned", "choosing_voice", "ready"}
+        finished_statuses = {"completed"}
+        stopped_statuses = {"paused", "failed", "cancelled"}
+
+        def rows(items: list[object], empty: str) -> str:
+            if not items:
+                return f'<div class="empty">{self._e(empty)}</div>'
+            return "".join(
+                f'<a class="job-row" href="/jobs/{self._e(job.id)}"><span><strong>{self._e(job.book_title)}</strong><small>Job {self._e(job.id[:12])} · {self._e(job.created_at)}</small></span><span class="status status-{self._e(job.status)}">{self._e(job.status)}</span></a>'
+                for job in items
+            )
+
+        groups = (
+            ("active", "Active", "Currently running or processing", active_statuses, "No active jobs."),
+            ("recent", "Recent", "Ready to start or awaiting work", recent_statuses, "No recent jobs."),
+            ("finished", "Finished", "Completed narration jobs", finished_statuses, "No finished jobs yet."),
+            ("stopped", "Stopped", "Paused, failed, or cancelled jobs", stopped_statuses, "No stopped jobs."),
+        )
+        sections = "".join(
+            f'<section class="panel jobs-section" id="jobs-{key}"><header><div><p class="eyebrow">{label}</p><h2>{len([job for job in jobs if job.status in statuses]):02d}</h2><p>{description}</p></div></header>{rows([job for job in jobs if job.status in statuses], empty)}</section>'
+            for key, label, description, statuses, empty in groups
+        )
+        body = f'''<section class="page-heading jobs-heading"><div><p class="eyebrow">Production jobs</p><h1>Every narration run in one place</h1><p>Track work across your library, return to a run, or review the audio it produced.</p></div><a class="button" href="/">Back to library</a></section><section class="jobs-grid">{sections}</section>'''
+        return self._layout("Jobs", body, environ)
 
     def _edit_connection(self, provider_id: str, environ: dict[str, object], csrf: str) -> str:
         provider = self.generation.get_provider(provider_id)
@@ -717,15 +748,16 @@ class NarranovaWebApp:
         refresh_tag = '<meta http-equiv="refresh" content="4">' if refresh else ""
         notice_html = f'<div class="notice">{self._e(notice)}</div>' if notice else ""
         nav = (
-            ("/", "Library", path == "/" or path.startswith("/books/") or path.startswith("/jobs/")),
-            ("/voices", "Voices", path.startswith("/voices")),
+            ("/", "Library", path == "/" or path.startswith("/books/")),
             ("/connections", "Connections", path.startswith("/connections")),
+            ("/voices", "Voices", path.startswith("/voices")),
+            ("/jobs", "Jobs", path == "/jobs" or path.startswith("/jobs/")),
         )
         nav_html = "".join(
             f'<a href="{href}" class="{"active" if active else ""}">{label}</a>'
             for href, label, active in nav
         )
-        return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{self._e(title)} · Narranova</title>{refresh_tag}<link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/choices.css"><script defer src="/static/app.js"></script></head><body><header class="topbar"><div class="topbar-inner"><a class="brand" href="/"><span>N</span><strong>Narranova</strong></a><nav aria-label="Primary navigation">{nav_html}</nav><div class="top-note"><i></i>Local studio</div></div></header><div class="shell">{notice_html}{body}</div><footer>Narranova · Local-first audiobook production · MOSS stays external</footer></body></html>"""
+        return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{self._e(title)} · Narranova</title>{refresh_tag}<link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/choices.css"><script defer src="/static/app.js"></script></head><body><header class="topbar"><div class="topbar-inner"><a class="brand" href="/"><span>N</span><strong>Narranova</strong></a><nav aria-label="Primary navigation">{nav_html}</nav></div></header><div class="shell">{notice_html}{body}</div><footer>Narranova · Local-first audiobook production</footer></body></html>"""
 
     def _parse_form(self, environ: dict[str, object]) -> tuple[dict[str, str], dict[str, Upload]]:
         try:
