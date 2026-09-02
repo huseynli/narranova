@@ -55,6 +55,35 @@ class NarrationPlan:
     def to_json(self) -> str:
         return json.dumps(self.as_dict(), ensure_ascii=False, indent=2) + "\n"
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "NarrationPlan":
+        plan = cls(
+            schema_version=int(data["schema_version"]),
+            revision=int(data["revision"]),
+            metadata=dict(data["metadata"]),
+            chapters=tuple(
+                NarrationChapter(
+                    spine_index=int(chapter["spine_index"]),
+                    document=str(chapter["document"]),
+                    title=str(chapter["title"]),
+                    unit_ids=tuple(chapter["unit_ids"]),
+                )
+                for chapter in data["chapters"]
+            ),
+            units=tuple(NarrationUnit(**unit) for unit in data["units"]),
+        )
+        if plan.schema_version != 1:
+            raise ValueError(f"Unsupported narration plan schema: {plan.schema_version}")
+        plan.validate()
+        return plan
+
+    @classmethod
+    def from_json(cls, content: str) -> "NarrationPlan":
+        data = json.loads(content)
+        if not isinstance(data, dict):
+            raise ValueError("Narration plan must be a JSON object")
+        return cls.from_dict(data)
+
     @property
     def sha256(self) -> str:
         return text_sha256(self.to_json())

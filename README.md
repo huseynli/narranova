@@ -49,3 +49,28 @@ sends `ref_text`. Narranova does not contain or launch the MOSS runtime.
 The disposable audiobook and OpenMOSS WebUI prototypes have been removed.
 Verified lessons were reimplemented behind Narranova's production boundaries;
 the external MOSS runtime remains a separate service.
+
+## External OpenMOSS generation
+
+With OpenMOSS already running separately, register its endpoint. Each command
+prints the ID needed by the next command:
+
+```console
+PYTHONPATH=src python -m narranova provider-add-openmoss "Local MOSS" \
+  http://127.0.0.1:8000/tts --data-dir ./data
+
+PYTHONPATH=src python -m narranova voice-create-openmoss BOOK_ID PROVIDER_ID \
+  --reference ./approved-reference.wav \
+  --instruction "A warm, restrained fiction audiobook narrator." \
+  --data-dir ./data
+
+PYTHONPATH=src python -m narranova job-create BOOK_ID VOICE_PROFILE_ID \
+  --data-dir ./data
+PYTHONPATH=src python -m narranova job-run JOB_ID --data-dir ./data
+PYTHONPATH=src python -m narranova job-status JOB_ID --data-dir ./data
+```
+
+Running `job-run` again resumes pending or failed work and skips completed WAVs
+whose hashes and audio frames still validate. From another shell,
+`job-pause JOB_ID` requests a pause after the current provider request finishes;
+running `job-run JOB_ID` resumes it.

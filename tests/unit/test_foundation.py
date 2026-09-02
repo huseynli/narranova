@@ -70,7 +70,7 @@ class DatabaseTests(unittest.TestCase):
                     )
                 }
 
-            self.assertEqual(migrations, [(1, "initial")])
+            self.assertEqual(migrations, [(1, "initial"), (2, "generation_jobs")])
             self.assertTrue({"books", "jobs", "chunks", "artifacts"} <= tables)
 
     def test_cli_init_creates_database_and_artifact_roots(self) -> None:

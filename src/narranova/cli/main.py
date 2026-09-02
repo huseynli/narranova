@@ -9,12 +9,14 @@ from pathlib import Path
 from typing import Sequence
 
 from narranova import __version__
+from narranova.application.generation import GenerationJobs, VoiceProfiles
 from narranova.application.ingest import ImportBook
 from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.config import Settings
 from narranova.epub import EpubError, EpubParser
 from narranova.persistence import Database
 from narranova.persistence.books import BookRepository
+from narranova.persistence.generation import GenerationRepository
 
 
 def _initialize(data_dir: str | Path | None) -> Path:
@@ -24,13 +26,15 @@ def _initialize(data_dir: str | Path | None) -> Path:
     return settings.data_dir
 
 
-def _services(data_dir: str | Path | None) -> tuple[Settings, ArtifactLayout, BookRepository]:
+def _services(
+    data_dir: str | Path | None,
+) -> tuple[Settings, ArtifactLayout, BookRepository, GenerationRepository]:
     settings = Settings.load(data_dir)
     layout = ArtifactLayout.at(settings.data_dir)
     layout.initialize()
     database = Database(settings.database_path)
     database.initialize()
-    return settings, layout, BookRepository(database)
+    return settings, layout, BookRepository(database), GenerationRepository(database)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,6 +61,44 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser = commands.add_parser("plan", help="print the latest narration plan for a book")
     plan_parser.add_argument("book_id", help="Narranova book ID")
     plan_parser.add_argument("--data-dir", help="persistent data directory")
+
+    provider_parser = commands.add_parser(
+        "provider-add-openmoss", help="register an external OpenMOSS endpoint"
+    )
+    provider_parser.add_argument("name", help="display name for this provider")
+    provider_parser.add_argument("endpoint", help="OpenMOSS /tts endpoint URL")
+    provider_parser.add_argument("--data-dir", help="persistent data directory")
+
+    voice_parser = commands.add_parser(
+        "voice-create-openmoss", help="save an approved OpenMOSS voice profile"
+    )
+    voice_parser.add_argument("book_id")
+    voice_parser.add_argument("provider_id")
+    voice_parser.add_argument("--reference", required=True, help="approved reference WAV")
+    voice_parser.add_argument("--instruction", required=True, help="narrator instruction")
+    voice_parser.add_argument("--language", default="English")
+    voice_parser.add_argument("--data-dir", help="persistent data directory")
+
+    create_job_parser = commands.add_parser(
+        "job-create", help="create a durable generation job"
+    )
+    create_job_parser.add_argument("book_id")
+    create_job_parser.add_argument("voice_profile_id")
+    create_job_parser.add_argument("--data-dir", help="persistent data directory")
+
+    run_job_parser = commands.add_parser("job-run", help="run or resume a generation job")
+    run_job_parser.add_argument("job_id")
+    run_job_parser.add_argument("--data-dir", help="persistent data directory")
+
+    status_parser = commands.add_parser("job-status", help="show durable chunk status")
+    status_parser.add_argument("job_id")
+    status_parser.add_argument("--data-dir", help="persistent data directory")
+
+    pause_parser = commands.add_parser(
+        "job-pause", help="pause after the active provider request finishes"
+    )
+    pause_parser.add_argument("job_id")
+    pause_parser.add_argument("--data-dir", help="persistent data directory")
     return parser
 
 
@@ -67,7 +109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             data_dir = _initialize(args.data_dir)
             print(f"Narranova data initialized at {data_dir}")
             return 0
-        settings, layout, repository = _services(args.data_dir)
+        settings, layout, repository, generation_repository = _services(args.data_dir)
         if args.command == "import":
             use_case = ImportBook(
                 EpubParser(), repository, layout, ArtifactStore(settings.data_dir)
@@ -95,6 +137,50 @@ def main(argv: Sequence[str] | None = None) -> int:
             if ArtifactStore.sha256(plan_path) != record["plan_sha256"]:
                 raise RuntimeError("Stored narration plan failed hash validation")
             print(json.dumps(json.loads(content), ensure_ascii=False, indent=2))
+            return 0
+        profiles = VoiceProfiles(
+            generation_repository, layout, ArtifactStore(settings.data_dir)
+        )
+        if args.command == "provider-add-openmoss":
+            provider_id = profiles.add_openmoss_provider(args.name, args.endpoint)
+            print(f"Registered OpenMOSS provider {provider_id}")
+            return 0
+        if args.command == "voice-create-openmoss":
+            profile_id = profiles.create_openmoss_profile(
+                book_id=args.book_id,
+                provider_id=args.provider_id,
+                reference_audio=Path(args.reference).expanduser().resolve(),
+                instruction=args.instruction,
+                language=args.language,
+            )
+            print(f"Created OpenMOSS voice profile {profile_id}")
+            return 0
+        jobs = GenerationJobs(
+            repository,
+            generation_repository,
+            layout,
+            ArtifactStore(settings.data_dir),
+        )
+        if args.command == "job-create":
+            job_id = jobs.create(args.book_id, args.voice_profile_id)
+            print(f"Created generation job {job_id}")
+            return 0
+        if args.command == "job-run":
+            jobs.run(args.job_id)
+            print(f"Generation job {args.job_id} completed")
+            return 0
+        if args.command == "job-status":
+            job = generation_repository.get_job(args.job_id)
+            chunks = generation_repository.list_chunks(args.job_id)
+            counts: dict[str, int] = {}
+            for chunk in chunks:
+                counts[chunk.status] = counts.get(chunk.status, 0) + 1
+            summary = ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
+            print(f"{job['id']}  {job['status']}  {summary}")
+            return 0
+        if args.command == "job-pause":
+            generation_repository.request_pause(args.job_id)
+            print(f"Pause requested for generation job {args.job_id}")
             return 0
         raise AssertionError(f"Unhandled command: {args.command}")
     except (EpubError, FileNotFoundError, KeyError, RuntimeError, ValueError) as exc:

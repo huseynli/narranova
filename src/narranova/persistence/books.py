@@ -73,7 +73,7 @@ class BookRepository:
         with self.database.connect() as connection:
             row = connection.execute(
                 """
-                SELECT p.artifact_path, p.plan_sha256, p.revision
+                SELECT p.id, p.artifact_path, p.plan_sha256, p.revision, p.locked_at
                 FROM narration_plans p
                 WHERE p.book_id = ? ORDER BY p.revision DESC LIMIT 1
                 """,

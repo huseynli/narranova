@@ -51,3 +51,19 @@ class ArtifactLayout:
     def chunk_master(self, book_id: str, chunk_id: str) -> Path:
         safe_chunk_id = _validate_id(chunk_id, "chunk id")
         return self.book_root(book_id) / "chunks" / f"{safe_chunk_id}.wav"
+
+    def voice_reference(self, book_id: str, profile_id: str) -> Path:
+        safe_profile_id = _validate_id(profile_id, "voice profile id")
+        return self.book_root(book_id) / "voice" / safe_profile_id / "reference.wav"
+
+    def job_root(self, book_id: str, job_id: str) -> Path:
+        safe_job_id = _validate_id(job_id, "job id")
+        return self.book_root(book_id) / "jobs" / safe_job_id
+
+    def job_chunk_text(self, book_id: str, job_id: str, chunk_id: str) -> Path:
+        safe_chunk_id = _validate_id(chunk_id, "chunk id")
+        return self.job_root(book_id, job_id) / "chunks" / f"{safe_chunk_id}.txt"
+
+    def job_chunk_master(self, book_id: str, job_id: str, chunk_id: str) -> Path:
+        safe_chunk_id = _validate_id(chunk_id, "chunk id")
+        return self.job_root(book_id, job_id) / "chunks" / f"{safe_chunk_id}.wav"
