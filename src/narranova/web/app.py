@@ -434,12 +434,11 @@ class NarranovaWebApp:
             for job in jobs
         ) or '<div class="empty">Generation jobs will appear here.</div>'
         body = f"""
-        <section class="page-heading workspace-heading"><div><p class="eyebrow">Production workspace</p><h1>Your audiobook desk</h1><p>Bring in a book, shape its narration, then generate at your own pace.</p></div>
-          <form class="import-card" method="post" action="/actions/import" enctype="multipart/form-data">
-            {self._csrf(csrf)}<label for="epub">Add a DRM-free EPUB</label><div><input id="epub" name="epub" type="file" accept=".epub,application/epub+zip" required><button class="primary">Import book</button></div>
-          </form></section>
+        <section class="page-heading workspace-heading full-page-heading"><div><p class="eyebrow">Production workspace</p><h1>Your audiobook desk</h1><p>Bring in a book, shape its narration, then generate at your own pace.</p></div></section>
         <section class="stat-strip"><a href="/"><strong>{len(books)}</strong><span>Books</span></a><a href="/connections"><strong>{len(providers)}</strong><span>TTS connections</span></a><a href="/voices"><strong>{len(profiles)}</strong><span>Voice profiles</span></a><a href="/jobs"><strong>{len(jobs)}</strong><span>Recent jobs</span></a></section>
-        <div class="dashboard-grid"><section class="panel library"><header><div><p class="eyebrow">Library</p><h2>Books in progress</h2></div><span class="count">{len(books):02d}</span></header>{book_cards}</section>
+        <div class="dashboard-grid"><div class="dashboard-primary"><form class="import-card" method="post" action="/actions/import" enctype="multipart/form-data">
+            {self._csrf(csrf)}<label for="epub">Add a DRM-free EPUB</label><div><input id="epub" name="epub" type="file" accept=".epub,application/epub+zip" required><button class="primary">Import book</button></div>
+          </form><section class="panel library"><header><div><p class="eyebrow">Library</p><h2>Books in progress</h2></div><span class="count">{len(books):02d}</span></header>{book_cards}</section></div>
         <aside class="stack"><section class="panel" id="recent-jobs"><header><div><p class="eyebrow">Activity</p><h2>Recent jobs</h2></div></header>{job_rows}</section></aside></div>"""
         return self._layout("Workspace", body, environ)
 
@@ -453,7 +452,7 @@ class NarranovaWebApp:
             f'<option value="{self._e(item.id)}">{self._e(item.label)}</option>'
             for item in PROVIDER_TYPES
         )
-        body = f"""<section class="page-heading"><div><p class="eyebrow">TTS connections</p><h1>Connect your voice engine</h1><p>Narranova sends text and approved voice references to services you operate separately.</p></div></section>
+        body = f"""<section class="page-heading full-page-heading"><div><p class="eyebrow">TTS connections</p><h1>Connect your voice engine</h1><p>Narranova sends text and approved voice references to services you operate separately.</p></div></section>
         <div class="settings-grid"><main><div class="section-heading"><div><h2>Saved connections</h2><p>{len(providers)} configured</p></div></div><div class="connection-list">{cards}</div></main>
         <aside class="panel form-card"><header><div><p class="eyebrow">New connection</p><h2>Add a TTS engine</h2></div></header><form method="post" action="/connections">{self._csrf(csrf)}<label>Connection type<small>Each engine exposes its own Voice Lab controls.</small><select name="kind" required>{type_options}</select></label><label>Connection name<small>Use a name that identifies the machine or model.</small><input name="name" placeholder="Studio MOSS" required></label><label>Service endpoint<small>For OpenMOSS, enter its external /tts URL.</small><input name="endpoint" type="url" value="http://127.0.0.1:8000/tts" required></label><button class="primary">Save connection</button></form></aside></div>"""
         return self._layout("Connections", body, environ)
@@ -484,7 +483,7 @@ class NarranovaWebApp:
             f'<section class="panel jobs-section" id="jobs-{key}"><header><div><p class="eyebrow">{label}</p><h2>{len([job for job in jobs if job.status in statuses]):02d}</h2><p>{description}</p></div></header>{rows([job for job in jobs if job.status in statuses], empty)}</section>'
             for key, label, description, statuses, empty in groups
         )
-        body = f'''<section class="page-heading jobs-heading"><div><p class="eyebrow">Production jobs</p><h1>Every narration run in one place</h1><p>Track work across your library, return to a run, or review the audio it produced.</p></div><a class="button" href="/">Back to library</a></section><section class="jobs-grid">{sections}</section>'''
+        body = f'''<section class="page-heading jobs-heading full-page-heading"><div><p class="eyebrow">Production jobs</p><h1>Every narration run in one place</h1><p>Track work across your library, return to a run, or review the audio it produced.</p></div><a class="button" href="/">Back to library</a></section><section class="jobs-grid">{sections}</section>'''
         return self._layout("Jobs", body, environ)
 
     def _edit_connection(self, provider_id: str, environ: dict[str, object], csrf: str) -> str:
@@ -507,7 +506,7 @@ class NarranovaWebApp:
             for profile in profiles
         ) or """<div class="empty-state"><span>V</span><h3>No saved voices</h3><p>Create an audition workspace to find your first reference and instruction pair.</p></div>"""
         start = f"""<form method="post" action="/voices/drafts">{self._csrf(csrf)}<button class="primary">Open Voice Lab</button></form>"""
-        body = f"""<section class="page-heading"><div><p class="eyebrow">Narrator pairs</p><h1>Choose a voice or build your own</h1><p>Built-in pairs are ready for any OpenMOSS connection. Custom profiles remain yours to edit and reuse.</p></div></section><section class="builtin-library"><div class="section-heading"><div><p class="eyebrow">Included with Narranova</p><h2>Built-in narrator pairs</h2><p>Preview the reference audio and its matching instruction.</p></div><span class="count">{len(self.default_voices):02d}</span></div><div class="builtin-voice-grid">{builtin_cards}</div></section><div class="voice-library-grid"><main><div class="section-heading"><div><h2>Your profiles</h2><p>{len(profiles)} custom profiles ready for narration</p></div></div><div class="voice-list">{profile_cards}</div></main><aside class="panel start-studio"><div class="studio-glyph">♪</div><p class="eyebrow">Voice Lab</p><h2>Build a custom pair</h2><p>Create reference audio, pair it with precise narration instructions, and save it for any book.</p>{start}</aside></div>"""
+        body = f"""<section class="page-heading full-page-heading"><div><p class="eyebrow">Narrator pairs</p><h1>Choose a voice or build your own</h1><p>Built-in pairs are ready for any OpenMOSS connection. Custom profiles remain yours to edit and reuse.</p></div></section><div class="voice-library-stack"><aside class="panel start-studio"><div class="studio-glyph">♪</div><div class="start-studio-copy"><p class="eyebrow">Voice Lab</p><h2>Build a custom pair</h2><p>Create reference audio, pair it with precise narration instructions, and save it for any book.</p></div>{start}</aside><section class="custom-voice-library"><div class="section-heading"><div><p class="eyebrow">Created by you</p><h2>Your profiles</h2><p>{len(profiles)} custom profiles ready for narration</p></div><span class="count">{len(profiles):02d}</span></div><div class="voice-list">{profile_cards}</div></section><section class="builtin-library"><div class="section-heading"><div><p class="eyebrow">Included with Narranova</p><h2>Built-in narrator pairs</h2><p>Preview the reference audio and its matching instruction.</p></div><span class="count">{len(self.default_voices):02d}</span></div><div class="builtin-voice-grid">{builtin_cards}</div></section></div>"""
         return self._layout("Voices", body, environ)
 
     def _edit_voice(self, profile_id: str, environ: dict[str, object], csrf: str) -> str:

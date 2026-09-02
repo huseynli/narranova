@@ -48,8 +48,10 @@ class WebAppTests(unittest.TestCase):
 
             self.assertEqual(status, "200 OK")
             self.assertIn(b"Your audiobook desk", body)
+            self.assertIn(b"workspace-heading full-page-heading", body)
             self.assertIn(b"No books yet", body)
             self.assertNotIn(b"Prepare your studio", body)
+            self.assertLess(body.index(b"Add a DRM-free EPUB"), body.index(b"Books in progress"))
             self.assertTrue(any(name == "Set-Cookie" for name, _ in headers))
 
     def test_jobs_workspace_has_requested_navigation_and_status_sections(self) -> None:
@@ -60,6 +62,7 @@ class WebAppTests(unittest.TestCase):
 
             self.assertEqual(status, "200 OK")
             self.assertIn(b"Every narration run in one place", body)
+            self.assertIn(b"jobs-heading full-page-heading", body)
             for label in (b"Active", b"Recent", b"Finished", b"Stopped"):
                 self.assertIn(label, body)
             self.assertNotIn(b"Local studio", body)
@@ -227,6 +230,7 @@ class WebAppTests(unittest.TestCase):
             status, _, connections = request(app, "/connections")
             self.assertEqual(status, "200 OK")
             self.assertIn(b"Connect your voice engine", connections)
+            self.assertIn(b'class="page-heading full-page-heading"', connections)
             self.assertIn(b'action="/connections"', connections)
             self.assertIn(b'name="kind"', connections)
 
@@ -234,8 +238,13 @@ class WebAppTests(unittest.TestCase):
             cookie = next(value for name, value in headers if name == "Set-Cookie")
             token = cookie.split(";", 1)[0].split("=", 1)[1]
             self.assertIn(b"Choose a voice or build your own", voices)
+            self.assertIn(b'class="page-heading full-page-heading"', voices)
             self.assertIn(b"Built-in narrator pairs", voices)
             self.assertIn(b"01 female", voices)
+            self.assertIn(b"Created by you", voices)
+            self.assertIn(b'<span class="count">01</span>', voices)
+            self.assertLess(voices.index(b"Build a custom pair"), voices.index(b"Your profiles"))
+            self.assertLess(voices.index(b"Your profiles"), voices.index(b"Built-in narrator pairs"))
 
             status, audio_headers, audio = request(app, "/default-voices/01/audio")
             self.assertEqual(status, "200 OK")

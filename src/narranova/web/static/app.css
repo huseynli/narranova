@@ -115,11 +115,9 @@ h3 { margin: 0; font-size: 16px; }
   font-size: 16px;
   line-height: 1.55;
 }
-.workspace-heading {
-  display: grid;
-  grid-template-columns: minmax(0,1fr) minmax(360px,.72fr);
-  align-items: end;
-}
+.full-page-heading > div { flex: 1; min-width: 0; }
+.full-page-heading h1,
+.full-page-heading > div > p:last-child { max-width: none; }
 .import-card {
   padding: 20px;
   border-radius: 12px;
@@ -151,12 +149,13 @@ h3 { margin: 0; font-size: 16px; }
   border-bottom: 1px solid var(--line);
 }
 .count { color: #aaa59a; font: 400 34px/1 Georgia, serif; }
-.dashboard-grid, .book-grid, .settings-grid, .voice-library-grid, .narration-grid {
+.dashboard-grid, .book-grid, .settings-grid, .narration-grid {
   display: grid;
   grid-template-columns: minmax(0,1.55fr) minmax(320px,.8fr);
   gap: 24px;
   align-items: start;
 }
+.dashboard-primary { display: grid; gap: 24px; min-width: 0; }
 .jobs-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -303,8 +302,8 @@ h3 { margin: 0; font-size: 16px; }
 .edit-panel { max-width: 720px; }
 .edit-panel > form { display: grid; gap: 18px; padding: 28px; }
 .form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
-.form-card, .start-studio, .save-profile { position: sticky; top: 94px; }
-.form-card form, .start-studio form, .save-profile form, .narration-form {
+.form-card, .save-profile { position: sticky; top: 94px; }
+.form-card form, .save-profile form, .narration-form {
   display: grid;
   gap: 17px;
   padding: 24px;
@@ -363,24 +362,34 @@ button.primary:hover, .button.primary:hover, .primary:hover { background: var(--
 .empty-state h3 { margin-top: 14px; color: var(--ink); }
 .empty-state p { max-width: 400px; margin: 6px 0 0; line-height: 1.5; }
 .empty-state.compact { min-height: 160px; }
-.start-studio { padding: 28px; background: var(--ink); color: white; }
-.start-studio h2 { margin: 8px 0 12px; color: white; font-size: 31px; }
-.start-studio > p:not(.eyebrow) { color: #bfc8c3; line-height: 1.55; }
-.start-studio form { padding: 18px 0 0; }
+.voice-library-stack { display: grid; gap: 36px; }
+.start-studio {
+  position: static;
+  display: grid;
+  grid-template-columns: auto minmax(0,1fr) auto;
+  align-items: center;
+  gap: 22px;
+  padding: 24px 28px;
+  background: var(--ink);
+  color: white;
+}
+.start-studio h2 { margin: 5px 0 7px; color: white; font-size: 27px; }
+.start-studio-copy > p:last-child { max-width: 680px; margin: 0; color: #bfc8c3; line-height: 1.5; }
+.start-studio form { padding: 0; }
 .start-studio label { color: #dfe5e1; }
 .studio-glyph {
   display: grid;
   place-items: center;
   width: 55px;
   height: 55px;
-  margin-bottom: 26px;
+  margin-bottom: 0;
   border: 1px solid #4a5551;
   border-radius: 50%;
   color: #f18a64;
   font: 26px Georgia, serif;
 }
-.builtin-library { margin-bottom: 36px; }
-.builtin-voice-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
+.builtin-library { margin-bottom: 0; }
+.builtin-voice-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
 .builtin-voice-card {
   display: grid;
   gap: 15px;
@@ -678,10 +687,9 @@ audio { width: 100%; height: 36px; }
 footer { padding: 26px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; letter-spacing: .1em; text-align: center; text-transform: uppercase; }
 
 @media (max-width: 920px) {
-  .workspace-heading, .dashboard-grid, .book-grid, .settings-grid, .voice-library-grid,
+  .dashboard-grid, .book-grid, .settings-grid,
   .narration-grid, .studio-grid, .jobs-grid { grid-template-columns: 1fr; }
-  .form-card, .start-studio, .save-profile { position: static; }
-  .builtin-voice-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .form-card, .save-profile { position: static; }
   .topbar-inner { grid-template-columns: 1fr auto; }
 }
 @media (max-width: 680px) {
@@ -699,7 +707,8 @@ footer { padding: 26px; border-top: 1px solid var(--line); color: var(--muted); 
   .stat-strip a:nth-child(2) { border-right: 0; }
   .stat-strip a:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
   .prompt-grid, .audition-form > .form-row { grid-template-columns: 1fr; }
-  .builtin-voice-grid { grid-template-columns: 1fr; }
+  .start-studio { grid-template-columns: 1fr; justify-items: start; }
+  .start-studio form, .start-studio form button { width: 100%; }
   .audition-form > .form-row, .audition-form > fieldset, .audition-form > button { margin-right: 16px; margin-left: 16px; }
   .chunk-row { align-items: stretch; flex-direction: column; }
   .chunk-row > div:first-child { grid-template-columns: 95px 1fr; }
