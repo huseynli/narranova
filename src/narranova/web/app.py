@@ -267,8 +267,19 @@ class NarranovaWebApp:
                     ),
                     set_cookie,
                 )
-            if method == "GET" and len(parts) == 5 and parts[0] == "jobs" and parts[2] == "chunks" and parts[4] == "audio":
-                return self._audio(start_response, parts[1], parts[3])
+            if (
+                method == "GET"
+                and len(parts) == 5
+                and parts[0] == "jobs"
+                and parts[2] == "chunks"
+                and parts[4] in {"audio", "download"}
+            ):
+                return self._audio(
+                    start_response,
+                    parts[1],
+                    parts[3],
+                    download=parts[4] == "download",
+                )
             if method == "POST":
                 fields, uploads = self._parse_form(environ)
                 try:
@@ -436,10 +447,10 @@ class NarranovaWebApp:
         body = f"""
         <section class="page-heading workspace-heading full-page-heading"><div><p class="eyebrow">Production workspace</p><h1>Your audiobook desk</h1><p>Bring in a book, shape its narration, then generate at your own pace.</p></div></section>
         <section class="stat-strip"><a href="/"><strong>{len(books)}</strong><span>Books</span></a><a href="/connections"><strong>{len(providers)}</strong><span>TTS connections</span></a><a href="/voices"><strong>{len(profiles)}</strong><span>Voice profiles</span></a><a href="/jobs"><strong>{len(jobs)}</strong><span>Recent jobs</span></a></section>
-        <div class="dashboard-grid"><div class="dashboard-primary"><form class="import-card" method="post" action="/actions/import" enctype="multipart/form-data">
+        <div class="dashboard-grid"><section class="panel library"><header><div><p class="eyebrow">Library</p><h2>Books in progress</h2></div><span class="count">{len(books):02d}</span></header>{book_cards}</section>
+        <aside class="stack"><form class="import-card" method="post" action="/actions/import" enctype="multipart/form-data">
             {self._csrf(csrf)}<label for="epub">Add a DRM-free EPUB</label><div><input id="epub" name="epub" type="file" accept=".epub,application/epub+zip" required><button class="primary">Import book</button></div>
-          </form><section class="panel library"><header><div><p class="eyebrow">Library</p><h2>Books in progress</h2></div><span class="count">{len(books):02d}</span></header>{book_cards}</section></div>
-        <aside class="stack"><section class="panel" id="recent-jobs"><header><div><p class="eyebrow">Activity</p><h2>Recent jobs</h2></div></header>{job_rows}</section></aside></div>"""
+          </form><section class="panel" id="recent-jobs"><header><div><p class="eyebrow">Activity</p><h2>Recent jobs</h2></div></header>{job_rows}</section></aside></div>"""
         return self._layout("Workspace", body, environ)
 
     def _connections(self, environ: dict[str, object], csrf: str) -> str:
@@ -483,7 +494,7 @@ class NarranovaWebApp:
             f'<section class="panel jobs-section" id="jobs-{key}"><header><div><p class="eyebrow">{label}</p><h2>{len([job for job in jobs if job.status in statuses]):02d}</h2><p>{description}</p></div></header>{rows([job for job in jobs if job.status in statuses], empty)}</section>'
             for key, label, description, statuses, empty in groups
         )
-        body = f'''<section class="page-heading jobs-heading full-page-heading"><div><p class="eyebrow">Production jobs</p><h1>Every narration run in one place</h1><p>Track work across your library, return to a run, or review the audio it produced.</p></div><a class="button" href="/">Back to library</a></section><section class="jobs-grid">{sections}</section>'''
+        body = f'''<section class="page-heading jobs-heading full-page-heading"><div><p class="eyebrow">Production jobs</p><h1>Every narration run in one place</h1><p>Track work across your library, return to a run, or review the audio it produced.</p></div></section><section class="jobs-grid">{sections}</section>'''
         return self._layout("Jobs", body, environ)
 
     def _edit_connection(self, provider_id: str, environ: dict[str, object], csrf: str) -> str:
@@ -671,7 +682,7 @@ class NarranovaWebApp:
         completed = sum(chunk.status == "completed" for chunk in chunks)
         percent = round((completed / len(chunks)) * 100) if chunks else 0
         chunk_rows = "".join(
-            f"""<article class="chunk-row"><div><span class="mono">{self._e(chunk.id)}</span><strong>{self._e(chunk.status)}</strong><small>{chunk.attempts} attempt{'s' if chunk.attempts != 1 else ''}{f' · {chunk.duration_seconds:.1f}s' if chunk.duration_seconds else ''}</small></div><div class="chunk-actions">{f'<audio controls preload="none" src="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/audio"></audio><a class="danger-link" href="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/delete">Delete audio</a>' if chunk.status == 'completed' else ''}</div></article>"""
+            f"""<article class="chunk-row"><div><span class="mono">{self._e(chunk.id)}</span><strong>{self._e(chunk.status)}</strong><small>{chunk.attempts} attempt{'s' if chunk.attempts != 1 else ''}{f' · {chunk.duration_seconds:.1f}s' if chunk.duration_seconds else ''}</small></div><div class="chunk-actions">{f'<audio controls preload="none" src="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/audio"></audio><span class="chunk-action-links"><a class="chunk-download" href="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/download">Download</a><a class="danger-link" href="/jobs/{self._e(job_id)}/chunks/{self._e(chunk.database_id)}/delete">Delete</a></span>' if chunk.status == 'completed' else ''}</div></article>"""
             for chunk in chunks
         )
         error = f'<div class="alert">{self._e(job.get("error_message") or "")}</div>' if job.get("error_message") else ""
@@ -695,7 +706,14 @@ class NarranovaWebApp:
         body = f"""<section class="confirm-page"><p class="eyebrow">Confirmation required</p><h1>{self._e(title)}</h1><h2>{self._e(subject)}</h2><p>{self._e(warning)}</p><div class="confirm-actions"><a class="button" href="{cancel}">Cancel</a><form method="post" action="{action}">{self._csrf(csrf)}<button class="danger-button">{self._e(button)}</button></form></div></section>"""
         return self._layout(title, body, environ)
 
-    def _audio(self, start_response: StartResponse, job_id: str, chunk_id: str) -> Iterable[bytes]:
+    def _audio(
+        self,
+        start_response: StartResponse,
+        job_id: str,
+        chunk_id: str,
+        *,
+        download: bool = False,
+    ) -> Iterable[bytes]:
         chunk = self.generation.get_chunk(job_id, chunk_id)
         if chunk.status != "completed" or not chunk.audio_artifact_path:
             raise KeyError("Audio is not available")
@@ -703,7 +721,22 @@ class NarranovaWebApp:
         validate_wave(path)
         if self.store.sha256(path) != chunk.audio_sha256:
             raise RuntimeError("Audio failed hash validation")
-        return self._respond(start_response, "200 OK", path.read_bytes(), "audio/wav")
+        headers = None
+        if download:
+            safe_name = "".join(
+                character
+                for character in chunk.id
+                if character.isascii()
+                and (character.isalnum() or character in {"-", "_"})
+            ) or "chunk"
+            headers = [("Content-Disposition", f'attachment; filename="{safe_name}.wav"')]
+        return self._respond(
+            start_response,
+            "200 OK",
+            path.read_bytes(),
+            "audio/wav",
+            headers=headers,
+        )
 
     def _studio_audio(
         self,

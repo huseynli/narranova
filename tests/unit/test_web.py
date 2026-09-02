@@ -51,7 +51,8 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"workspace-heading full-page-heading", body)
             self.assertIn(b"No books yet", body)
             self.assertNotIn(b"Prepare your studio", body)
-            self.assertLess(body.index(b"Add a DRM-free EPUB"), body.index(b"Books in progress"))
+            self.assertIn(b'<aside class="stack"><form class="import-card"', body)
+            self.assertLess(body.index(b"Add a DRM-free EPUB"), body.index(b"Activity"))
             self.assertTrue(any(name == "Set-Cookie" for name, _ in headers))
 
     def test_jobs_workspace_has_requested_navigation_and_status_sections(self) -> None:
@@ -63,6 +64,7 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(status, "200 OK")
             self.assertIn(b"Every narration run in one place", body)
             self.assertIn(b"jobs-heading full-page-heading", body)
+            self.assertNotIn(b"Back to library", body)
             for label in (b"Active", b"Recent", b"Finished", b"Stopped"):
                 self.assertIn(label, body)
             self.assertNotIn(b"Local studio", body)
@@ -388,6 +390,45 @@ class WebAppTests(unittest.TestCase):
             _, _, completed_page = request(app, "/voices")
             self.assertNotIn(b"In use \xc2\xb7 1", completed_page)
             self.assertIn(f'/voices/{profile_id}/delete'.encode(), completed_page)
+
+    def test_completed_chunk_has_a_download_action_and_attachment_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "book.epub"
+            make_epub(source)
+            app = create_web_app(root / "data")
+            imported = app.import_book.execute(source)
+            provider_id = app.profiles.add_openmoss_provider(
+                "Job MOSS", "http://moss.test:8000/tts"
+            )
+            job_id = app.jobs.create(imported.book_id, "builtin:01", provider_id)
+            chunk = app.generation.list_chunks(job_id)[0]
+            audio_path = app.layout.job_chunk_master(imported.book_id, job_id, chunk.id)
+            make_wave(audio_path)
+            app.generation.complete_chunk(
+                job_id,
+                chunk.database_id,
+                audio_path.relative_to(app.layout.root).as_posix(),
+                app.store.sha256(audio_path),
+                0.01,
+            )
+
+            download_path = f"/jobs/{job_id}/chunks/{chunk.database_id}/download"
+            status, _, job_page = request(app, f"/jobs/{job_id}")
+            self.assertEqual(status, "200 OK")
+            self.assertIn(download_path.encode(), job_page)
+            self.assertIn(b'class="chunk-action-links"', job_page)
+            self.assertIn(b">Download</a>", job_page)
+            self.assertIn(b">Delete</a>", job_page)
+
+            status, headers, audio = request(app, download_path)
+            self.assertEqual(status, "200 OK")
+            self.assertIn(("Content-Type", "audio/wav"), headers)
+            self.assertIn(
+                ("Content-Disposition", f'attachment; filename="{chunk.id}.wav"'),
+                headers,
+            )
+            self.assertEqual(audio, audio_path.read_bytes())
 
 
 if __name__ == "__main__":

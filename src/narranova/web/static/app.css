@@ -133,6 +133,8 @@ h3 { margin: 0; font-size: 16px; }
   background: #232c2a;
   color: #cbd2cf;
 }
+.stack .import-card > div { align-items: stretch; flex-direction: column; }
+.stack .import-card button { width: 100%; }
 .panel {
   overflow: hidden;
   border: 1px solid var(--line);
@@ -155,7 +157,6 @@ h3 { margin: 0; font-size: 16px; }
   gap: 24px;
   align-items: start;
 }
-.dashboard-primary { display: grid; gap: 24px; min-width: 0; }
 .jobs-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -678,6 +679,10 @@ audio { width: 100%; height: 36px; }
 .chunk-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px 22px; border-bottom: 1px solid var(--line); }
 .chunk-row:last-child { border-bottom: 0; }
 .chunk-row > div:first-child { display: grid; grid-template-columns: 110px 100px 1fr; align-items: center; gap: 12px; }
+.chunk-actions { display: grid; grid-template-columns: minmax(220px,360px) auto; align-items: center; gap: 14px; }
+.chunk-action-links { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
+.chunk-download { color: var(--accent-dark); font-size: 11px; font-weight: 800; white-space: nowrap; }
+.chunk-download:hover { color: var(--ink); }
 .mono { color: var(--muted); font: 11px ui-monospace, monospace; }
 .complete-mark { color: #45603f; font-weight: 700; }
 .notice, .alert { margin-bottom: 20px; padding: 13px 16px; border: 1px solid #d8c8a7; border-radius: 8px; background: #fff6da; color: #63511f; }
@@ -713,6 +718,7 @@ footer { padding: 26px; border-top: 1px solid var(--line); color: var(--muted); 
   .chunk-row { align-items: stretch; flex-direction: column; }
   .chunk-row > div:first-child { grid-template-columns: 95px 1fr; }
   .chunk-row small { grid-column: 1/-1; }
+  .chunk-actions { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; transition: none !important; }
