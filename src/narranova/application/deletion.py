@@ -67,6 +67,17 @@ class DeleteArtifacts:
             raise
         self._discard(staged)
 
+    def voice_profile(self, profile_id: str) -> None:
+        self.generation.get_voice_and_provider(profile_id)
+        profile_root = self.layout.voice_profile_root(profile_id)
+        staged = self._stage(profile_root, "voice-profile")
+        try:
+            self.generation.delete_voice_profile(profile_id)
+        except Exception:
+            self._restore(staged, profile_root)
+            raise
+        self._discard(staged)
+
     def _artifact(self, relative_path: str) -> Path:
         path = (self.layout.root / relative_path).resolve()
         if not path.is_relative_to(self.layout.root):

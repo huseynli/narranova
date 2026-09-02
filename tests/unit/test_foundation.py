@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import tempfile
 import unittest
+import wave
+from importlib.resources import files
 from pathlib import Path
 
-from narranova.artifacts import ArtifactLayout
+from narranova.application.generation import VoiceProfiles
+from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.cli.main import main
 from narranova.config import Settings
 from narranova.persistence import Database
+from narranova.persistence.generation import GenerationRepository
 from narranova.providers import ProviderCapabilities, SynthesisRequest
 
 
@@ -51,6 +57,75 @@ class ProviderContractTests(unittest.TestCase):
 
 
 class DatabaseTests(unittest.TestCase):
+    def test_migrates_book_bound_voices_and_jobs_to_global_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            layout = ArtifactLayout.at(data)
+            layout.initialize()
+            old_reference = layout.legacy_voice_reference("book", "voice")
+            old_reference.parent.mkdir(parents=True)
+            with wave.open(str(old_reference), "wb") as output:
+                output.setnchannels(1)
+                output.setsampwidth(2)
+                output.setframerate(16_000)
+                output.writeframes(b"\x01\x00" * 160)
+            reference_hash = hashlib.sha256(old_reference.read_bytes()).hexdigest()
+            profile = {
+                "kind": "openmoss",
+                "name": "Legacy narrator",
+                "instruction": "A calm narrator.",
+                "language": "English",
+                "reference_artifact_path": old_reference.relative_to(data).as_posix(),
+                "reference_sha256": reference_hash,
+            }
+            path = data / "narranova.sqlite3"
+            migration_root = files("narranova.persistence.migrations")
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, "
+                    "name TEXT NOT NULL, applied_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+                )
+                connection.executescript(
+                    migration_root.joinpath("001_initial.sql").read_text(encoding="utf-8")
+                )
+                connection.executescript(
+                    migration_root.joinpath("002_generation_jobs.sql").read_text(encoding="utf-8")
+                )
+                connection.executemany(
+                    "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                    [(1, "initial"), (2, "generation_jobs")],
+                )
+                connection.execute(
+                    "INSERT INTO provider_instances(id, kind, name, endpoint_url) "
+                    "VALUES ('provider', 'openmoss', 'MOSS', 'http://moss/tts')"
+                )
+                connection.execute(
+                    "INSERT INTO books(id, source_sha256, source_artifact_path) "
+                    "VALUES ('book', 'source-hash', 'books/book/source/original.epub')"
+                )
+                connection.execute(
+                    "INSERT INTO voice_profiles(id, book_id, provider_instance_id, "
+                    "profile_json, profile_sha256) VALUES (?, ?, ?, ?, ?)",
+                    ("voice", "book", "provider", json.dumps(profile), "old-profile-hash"),
+                )
+                connection.execute(
+                    "INSERT INTO jobs(id, book_id, voice_profile_id, status) "
+                    "VALUES ('job', 'book', 'voice', 'ready')"
+                )
+
+            database = Database(path)
+            database.initialize()
+            repository = GenerationRepository(database)
+            VoiceProfiles(repository, layout, ArtifactStore(data))
+
+            migrated = repository.get_voice_and_provider("voice")
+            migrated_reference = data / migrated["profile"]["reference_artifact_path"]
+            self.assertEqual(repository.get_job("job")["narrator_profile_id"], "voice")
+            self.assertEqual(migrated["profile"]["name"], "Legacy narrator")
+            self.assertTrue(migrated_reference.is_file())
+            self.assertTrue(migrated_reference.is_relative_to(layout.voices_root))
+            self.assertFalse(old_reference.exists())
+
     def test_initialization_is_idempotent_and_applies_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "narranova.sqlite3"
@@ -70,8 +145,17 @@ class DatabaseTests(unittest.TestCase):
                     )
                 }
 
-            self.assertEqual(migrations, [(1, "initial"), (2, "generation_jobs")])
-            self.assertTrue({"books", "jobs", "chunks", "artifacts"} <= tables)
+            self.assertEqual(
+                migrations,
+                [
+                    (1, "initial"),
+                    (2, "generation_jobs"),
+                    (3, "global_narrator_profiles"),
+                ],
+            )
+            self.assertTrue(
+                {"books", "jobs", "chunks", "artifacts", "narrator_profiles"} <= tables
+            )
 
     def test_cli_init_creates_database_and_artifact_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -80,6 +164,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertTrue((Path(temporary) / "narranova.sqlite3").is_file())
             self.assertTrue((Path(temporary) / "books").is_dir())
+            self.assertTrue((Path(temporary) / "voices").is_dir())
 
 
 if __name__ == "__main__":

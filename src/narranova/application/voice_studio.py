@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from narranova.application.generation import VoiceProfiles
+from narranova.application.provider_catalog import provider_type
 from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.audio import validate_wave
-from narranova.persistence.books import BookRepository
 from narranova.persistence.generation import GenerationRepository
 from narranova.providers import OpenMossConfig, OpenMossProvider, SynthesisRequest, TTSProvider
 
@@ -50,14 +50,12 @@ DEFAULT_SAMPLE_TEXT = (
 class VoiceStudio:
     def __init__(
         self,
-        books: BookRepository,
         generation: GenerationRepository,
         profiles: VoiceProfiles,
         layout: ArtifactLayout,
         store: ArtifactStore,
         provider_factory: Callable[[dict[str, Any]], TTSProvider] | None = None,
     ) -> None:
-        self.books = books
         self.generation = generation
         self.profiles = profiles
         self.layout = layout
@@ -65,15 +63,13 @@ class VoiceStudio:
         self.provider_factory = provider_factory or self._openmoss_provider
         self.layout.voice_studio_root.mkdir(parents=True, exist_ok=True)
 
-    def start(self, book_id: str) -> str:
-        self.books.get_book(book_id)
+    def start(self) -> str:
         self.cleanup_stale()
         draft_id = uuid.uuid4().hex
         now = time.time()
         draft: dict[str, Any] = {
             "version": 1,
             "id": draft_id,
-            "book_id": book_id,
             "created_at": now,
             "updated_at": now,
             "name": "",
@@ -124,6 +120,7 @@ class VoiceStudio:
         provider = self.generation.get_provider(provider_id)
         if not provider["enabled"]:
             raise ValueError("The selected TTS connection is disabled")
+        definition = provider_type(str(provider["kind"]))
         if uploaded_reference is not None:
             validate_wave(uploaded_reference)
             upload_path = self.layout.voice_studio_upload(draft_id)
@@ -144,7 +141,11 @@ class VoiceStudio:
             }
         )
         self._write(draft)
-        reference = self._reference(draft, reference_choice)
+        reference = self._reference(
+            draft,
+            reference_choice,
+            required=not definition.reference_audio_optional,
+        )
         take_id = uuid.uuid4().hex
         destination = self.layout.voice_studio_take(draft_id, take_id)
         try:
@@ -192,23 +193,21 @@ class VoiceStudio:
         reference_choice: str,
         instruction: str,
         language: str,
-    ) -> tuple[str, str]:
+    ) -> str:
         draft = self.get(draft_id)
         provider = self.generation.get_provider(provider_id)
         if not provider["enabled"]:
             raise ValueError("The selected TTS connection is disabled")
-        reference = self._reference(draft, reference_choice)
+        reference = self._reference(draft, reference_choice, required=True)
         profile_id = self.profiles.create_openmoss_profile(
-            book_id=str(draft["book_id"]),
             provider_id=provider_id,
             reference_audio=reference,
             instruction=instruction,
             name=name,
             language=language.strip() or "English",
         )
-        book_id = str(draft["book_id"])
         self.discard(draft_id)
-        return profile_id, book_id
+        return profile_id
 
     def take_audio(self, draft_id: str, take_id: str) -> tuple[Path, str]:
         draft = self.get(draft_id)
@@ -235,14 +234,20 @@ class VoiceStudio:
             if path.is_dir() and modified_at < cutoff:
                 shutil.rmtree(path, ignore_errors=True)
 
-    def _reference(self, draft: dict[str, Any], choice: str) -> Path:
+    def _reference(
+        self,
+        draft: dict[str, Any],
+        choice: str,
+        *,
+        required: bool = False,
+    ) -> Path | None:
+        if choice in {"", "none"} and not required:
+            return None
         if choice == "uploaded":
             relative = draft.get("uploaded_reference_path")
             expected_hash = draft.get("uploaded_reference_sha256")
         elif choice.startswith("profile:"):
             profile = self.generation.get_voice_and_provider(choice.split(":", 1)[1])
-            if profile["book_id"] != draft["book_id"]:
-                raise ValueError("Selected voice profile belongs to another book")
             relative = profile["profile"].get("reference_artifact_path")
             expected_hash = profile["profile"].get("reference_sha256")
         elif choice.startswith("take:"):
@@ -253,7 +258,7 @@ class VoiceStudio:
             relative = take["audio_path"]
             expected_hash = take["audio_sha256"]
         else:
-            raise ValueError("Choose or upload a reference WAV before generating")
+            raise ValueError("Choose or upload the reference WAV to save")
         if not relative or not expected_hash:
             raise ValueError("Choose or upload a reference WAV before generating")
         path = self._artifact(str(relative))

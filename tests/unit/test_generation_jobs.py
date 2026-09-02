@@ -60,7 +60,6 @@ class GenerationJobTests(unittest.TestCase):
                 "Test MOSS", "http://moss.test:8000/tts"
             )
             profile_id = profiles.create_openmoss_profile(
-                book_id=imported.book_id,
                 provider_id=provider_id,
                 reference_audio=reference,
                 instruction="A careful narrator.",
@@ -72,6 +71,16 @@ class GenerationJobTests(unittest.TestCase):
             )
 
             job_id = jobs.create(imported.book_id, profile_id)
+            profiles.update_openmoss_profile(
+                profile_id,
+                provider_id=provider_id,
+                instruction="A newly edited narrator.",
+                name="Edited narrator",
+            )
+            self.assertEqual(
+                generation.get_job(job_id)["profile"]["instruction"],
+                "A careful narrator.",
+            )
             other_provider_id = profiles.add_openmoss_provider(
                 "Other MOSS", "http://other-moss.test:8000/tts"
             )
@@ -123,11 +132,11 @@ class GenerationJobTests(unittest.TestCase):
                     "VALUES ('b', 'hash', 'source.epub')"
                 )
                 connection.execute(
-                    "INSERT INTO voice_profiles(id, book_id, provider_instance_id, "
-                    "profile_json, profile_sha256) VALUES ('v', 'b', 'p', '{}', 'hash')"
+                    "INSERT INTO narrator_profiles(id, provider_instance_id, "
+                    "profile_json, profile_sha256) VALUES ('v', 'p', '{}', 'hash')"
                 )
                 connection.execute(
-                    "INSERT INTO jobs(id, book_id, voice_profile_id, status) "
+                    "INSERT INTO jobs(id, book_id, narrator_profile_id, status) "
                     "VALUES ('j', 'b', 'v', 'generating')"
                 )
                 connection.execute(

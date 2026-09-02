@@ -37,6 +37,27 @@ class FakeResponse:
 
 
 class OpenMossProviderTests(unittest.TestCase):
+    def test_instruction_only_request_omits_reference_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "audition.wav"
+            response = FakeResponse(
+                b"\x01\x00" * 240,
+                {"X-MOSS-Sample-Rate": "24000", "X-MOSS-Channels": "1"},
+            )
+            provider = OpenMossProvider(OpenMossConfig("http://moss.local:8000/tts"))
+            request = SynthesisRequest(
+                text="Try this voice.",
+                destination=destination,
+                instruction="A warm, measured narrator.",
+            )
+
+            with patch.object(urllib.request, "urlopen", return_value=response) as urlopen:
+                provider.synthesize(request)
+
+            sent = json.loads(urlopen.call_args.args[0].data)
+            self.assertNotIn("reference_wav_b64", sent)
+            self.assertTrue(destination.is_file())
+
     def test_streams_safe_clone_payload_and_atomically_promotes_wave(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

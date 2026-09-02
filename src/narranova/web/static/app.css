@@ -299,6 +299,18 @@ h3 { margin: 0; font-size: 16px; }
   text-overflow: ellipsis;
 }
 .connection-card small { color: var(--muted); }
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 15px;
+  font-size: 11px;
+  font-weight: 800;
+}
+.voice-card header .card-actions { margin: 0 0 0 auto; }
+.edit-panel { max-width: 720px; }
+.edit-panel > form { display: grid; gap: 18px; padding: 28px; }
+.form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
 .form-card, .start-studio, .save-profile { position: sticky; top: 94px; }
 .form-card form, .start-studio form, .save-profile form, .narration-form {
   display: grid;
@@ -434,6 +446,18 @@ audio { width: 100%; height: 36px; }
   border-top: 1px solid var(--line);
 }
 .audition-form legend, .reference-list legend { padding: 0; color: var(--ink); font: 500 22px Georgia, serif; }
+.optional-label {
+  display: inline-block;
+  margin-left: 7px;
+  padding: 4px 6px;
+  border-radius: 999px;
+  background: var(--moss-pale);
+  color: var(--moss);
+  font: 800 8px Inter, sans-serif;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
 .field-help { max-width: 620px; margin: -8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .prompt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .prompt-chip {

@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 
 from narranova.web import create_web_app
 from tests.unit.test_epub_ingest import make_epub
+from tests.unit.test_generation_jobs import make_wave
 
 
 def request(
@@ -48,6 +49,7 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(status, "200 OK")
             self.assertIn(b"Your audiobook desk", body)
             self.assertIn(b"No books yet", body)
+            self.assertNotIn(b"Prepare your studio", body)
             self.assertTrue(any(name == "Set-Cookie" for name, _ in headers))
 
     def test_static_stylesheet_is_packaged(self) -> None:
@@ -189,15 +191,13 @@ class WebAppTests(unittest.TestCase):
     def test_connections_and_voice_studio_have_dedicated_pages(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source = root / "book.epub"
-            make_epub(source)
             app = create_web_app(root / "data")
-            imported = app.import_book.execute(source)
 
             status, _, connections = request(app, "/connections")
             self.assertEqual(status, "200 OK")
             self.assertIn(b"Connect your voice engine", connections)
             self.assertIn(b'action="/connections"', connections)
+            self.assertIn(b'name="kind"', connections)
 
             _, headers, voices = request(app, "/voices")
             cookie = next(value for name, value in headers if name == "Set-Cookie")
@@ -208,7 +208,7 @@ class WebAppTests(unittest.TestCase):
                 app,
                 "/voices/drafts",
                 method="POST",
-                body=urlencode({"csrf": token, "book_id": imported.book_id}).encode(),
+                body=urlencode({"csrf": token}).encode(),
                 cookie=cookie,
             )
             location = next(value for name, value in response_headers if name == "Location")
@@ -220,6 +220,87 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"Shape the narrator", studio)
             self.assertIn(b"Warm literary", studio)
             self.assertIn(b"The rain had stopped", studio)
+            self.assertIn(b"No reference", studio)
+            self.assertNotIn(b'name="book_id"', studio)
+
+    def test_connections_and_profiles_can_be_edited_and_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.wav"
+            make_wave(reference)
+            app = create_web_app(root / "data")
+            provider_id = app.profiles.add_openmoss_provider(
+                "Original MOSS", "http://moss.test:8000/tts"
+            )
+            profile_id = app.profiles.create_openmoss_profile(
+                provider_id=provider_id,
+                reference_audio=reference,
+                instruction="A careful narrator.",
+                name="Original voice",
+            )
+            _, headers, _ = request(app, "/voices")
+            cookie = next(value for name, value in headers if name == "Set-Cookie")
+            token = cookie.split(";", 1)[0].split("=", 1)[1]
+
+            status, _, edit_page = request(app, f"/voices/{profile_id}/edit")
+            self.assertEqual(status, "200 OK")
+            self.assertIn(b"Original voice", edit_page)
+            status, _, _ = request(
+                app,
+                f"/voices/{profile_id}",
+                method="POST",
+                body=urlencode(
+                    {
+                        "csrf": token,
+                        "provider_id": provider_id,
+                        "name": "Renamed voice",
+                        "instruction": "A warmer narrator.",
+                        "language": "English",
+                    }
+                ).encode(),
+                cookie=cookie,
+            )
+            self.assertEqual(status, "303 See Other")
+            self.assertEqual(
+                app.generation.get_voice_and_provider(profile_id)["profile"]["name"],
+                "Renamed voice",
+            )
+
+            status, _, _ = request(
+                app,
+                f"/connections/{provider_id}",
+                method="POST",
+                body=urlencode(
+                    {
+                        "csrf": token,
+                        "kind": "openmoss",
+                        "name": "Renamed MOSS",
+                        "endpoint": "http://moss.test:9000/tts",
+                    }
+                ).encode(),
+                cookie=cookie,
+            )
+            self.assertEqual(status, "303 See Other")
+            self.assertEqual(app.generation.get_provider(provider_id)["name"], "Renamed MOSS")
+
+            status, _, _ = request(
+                app,
+                f"/voices/{profile_id}/delete",
+                method="POST",
+                body=urlencode({"csrf": token}).encode(),
+                cookie=cookie,
+            )
+            self.assertEqual(status, "303 See Other")
+            status, _, _ = request(
+                app,
+                f"/connections/{provider_id}/delete",
+                method="POST",
+                body=urlencode({"csrf": token}).encode(),
+                cookie=cookie,
+            )
+            self.assertEqual(status, "303 See Other")
+            self.assertEqual(app.generation.list_voice_profiles(), [])
+            self.assertEqual(app.generation.list_providers(), [])
 
 
 if __name__ == "__main__":

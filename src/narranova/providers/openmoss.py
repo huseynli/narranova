@@ -84,9 +84,7 @@ class OpenMossProvider:
         )
 
     def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
-        if request.reference_audio is None:
-            raise ValueError("OpenMOSS synthesis requires selected reference audio")
-        if not request.reference_audio.is_file():
+        if request.reference_audio is not None and not request.reference_audio.is_file():
             raise FileNotFoundError(f"Reference audio not found: {request.reference_audio}")
         if not request.instruction or not request.instruction.strip():
             raise ValueError("OpenMOSS synthesis requires a narrator instruction")
@@ -100,12 +98,15 @@ class OpenMossProvider:
         payload: dict[str, Any] = {
             "text": request.text,
             "instruction": request.instruction,
-            "reference_wav_b64": base64.b64encode(request.reference_audio.read_bytes()).decode("ascii"),
             "max_new_tokens": self.config.max_new_tokens,
             "stream": True,
             "stream_chunk_frames": self.config.stream_chunk_frames,
             "response_format": "pcm",
         }
+        if request.reference_audio is not None:
+            payload["reference_wav_b64"] = base64.b64encode(
+                request.reference_audio.read_bytes()
+            ).decode("ascii")
         if request.language:
             payload["language"] = request.language
         sampling = dict(request.parameters)

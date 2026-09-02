@@ -72,7 +72,6 @@ def build_parser() -> argparse.ArgumentParser:
     voice_parser = commands.add_parser(
         "voice-create-openmoss", help="save an approved OpenMOSS voice profile"
     )
-    voice_parser.add_argument("book_id")
     voice_parser.add_argument("provider_id")
     voice_parser.add_argument("--reference", required=True, help="approved reference WAV")
     voice_parser.add_argument("--instruction", required=True, help="narrator instruction")
@@ -163,7 +162,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "voice-create-openmoss":
             profile_id = profiles.create_openmoss_profile(
-                book_id=args.book_id,
                 provider_id=args.provider_id,
                 reference_audio=Path(args.reference).expanduser().resolve(),
                 instruction=args.instruction,

@@ -36,10 +36,9 @@ class StoredProvider:
 @dataclass(frozen=True)
 class StoredVoiceProfile:
     id: str
-    book_id: str
-    book_title: str
     provider_id: str
     provider_name: str
+    provider_kind: str
     name: str
     profile: dict[str, Any]
 
@@ -65,17 +64,20 @@ class GenerationRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    def add_openmoss_provider(self, name: str, endpoint_url: str) -> str:
+    def add_provider(self, kind: str, name: str, endpoint_url: str) -> str:
         provider_id = uuid.uuid4().hex
         with self.database.connect() as connection:
             connection.execute(
                 """
                 INSERT INTO provider_instances(id, kind, name, endpoint_url)
-                VALUES (?, 'openmoss', ?, ?)
+                VALUES (?, ?, ?, ?)
                 """,
-                (provider_id, name, endpoint_url),
+                (provider_id, kind, name, endpoint_url),
             )
         return provider_id
+
+    def add_openmoss_provider(self, name: str, endpoint_url: str) -> str:
+        return self.add_provider("openmoss", name, endpoint_url)
 
     def list_providers(self) -> list[StoredProvider]:
         with self.database.connect() as connection:
@@ -102,31 +104,75 @@ class GenerationRepository:
         result["configuration"] = json.loads(result.pop("configuration_json"))
         return result
 
-    def list_voice_profiles(self, book_id: str | None = None) -> list[StoredVoiceProfile]:
-        query = """
-            SELECT v.id, v.book_id, COALESCE(b.title, 'Untitled') AS book_title,
-                   p.id AS provider_id, p.name AS provider_name, v.profile_json
-            FROM voice_profiles v
-            JOIN books b ON b.id = v.book_id
-            JOIN provider_instances p ON p.id = v.provider_instance_id
-        """
-        parameters: tuple[str, ...] = ()
-        if book_id is not None:
-            query += " WHERE v.book_id = ?"
-            parameters = (book_id,)
-        query += " ORDER BY v.created_at DESC, v.id DESC"
+    def update_provider(
+        self,
+        provider_id: str,
+        *,
+        kind: str,
+        name: str,
+        endpoint_url: str,
+    ) -> None:
         with self.database.connect() as connection:
-            rows = connection.execute(query, parameters).fetchall()
+            current = connection.execute(
+                "SELECT kind FROM provider_instances WHERE id = ?", (provider_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"TTS connection not found: {provider_id}")
+            if current["kind"] != kind:
+                in_use = connection.execute(
+                    "SELECT 1 FROM narrator_profiles "
+                    "WHERE provider_instance_id = ? LIMIT 1",
+                    (provider_id,),
+                ).fetchone()
+                if in_use:
+                    raise ValueError(
+                        "Create a new connection instead of changing the type of one "
+                        "used by voice profiles"
+                    )
+            cursor = connection.execute(
+                """
+                UPDATE provider_instances
+                SET kind = ?, name = ?, endpoint_url = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (kind, name, endpoint_url, provider_id),
+            )
+        if cursor.rowcount != 1:  # Defensive: the row was resolved in this transaction.
+            raise RuntimeError("TTS connection changed during update")
+
+    def delete_provider(self, provider_id: str) -> None:
+        with self.database.connect() as connection:
+            in_use = connection.execute(
+                "SELECT 1 FROM narrator_profiles WHERE provider_instance_id = ? LIMIT 1",
+                (provider_id,),
+            ).fetchone()
+            if in_use:
+                raise ValueError("Delete profiles using this TTS connection first")
+            cursor = connection.execute(
+                "DELETE FROM provider_instances WHERE id = ?", (provider_id,)
+            )
+        if cursor.rowcount != 1:
+            raise KeyError(f"TTS connection not found: {provider_id}")
+
+    def list_voice_profiles(self) -> list[StoredVoiceProfile]:
+        query = """
+            SELECT v.id, p.id AS provider_id, p.name AS provider_name,
+                   p.kind AS provider_kind, v.profile_json
+            FROM narrator_profiles v
+            JOIN provider_instances p ON p.id = v.provider_instance_id
+            ORDER BY v.updated_at DESC, v.id DESC
+        """
+        with self.database.connect() as connection:
+            rows = connection.execute(query).fetchall()
         profiles = []
         for row in rows:
             profile = json.loads(row["profile_json"])
             profiles.append(
                 StoredVoiceProfile(
                     id=row["id"],
-                    book_id=row["book_id"],
-                    book_title=row["book_title"],
                     provider_id=row["provider_id"],
                     provider_name=row["provider_name"],
+                    provider_kind=row["provider_kind"],
                     name=str(profile.get("name") or "Untitled voice"),
                     profile=profile,
                 )
@@ -192,7 +238,6 @@ class GenerationRepository:
         self,
         *,
         profile_id: str,
-        book_id: str,
         provider_id: str,
         profile: dict[str, Any],
         profile_sha256: str,
@@ -200,13 +245,12 @@ class GenerationRepository:
         with self.database.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO voice_profiles(
-                    id, book_id, provider_instance_id, profile_json, profile_sha256
-                ) VALUES (?, ?, ?, ?, ?)
+                INSERT INTO narrator_profiles(
+                    id, provider_instance_id, profile_json, profile_sha256
+                ) VALUES (?, ?, ?, ?)
                 """,
                 (
                     profile_id,
-                    book_id,
                     provider_id,
                     json.dumps(profile, ensure_ascii=False, sort_keys=True),
                     profile_sha256,
@@ -217,10 +261,10 @@ class GenerationRepository:
         with self.database.connect() as connection:
             row = connection.execute(
                 """
-                SELECT v.id, v.book_id, v.profile_json, v.profile_sha256,
+                SELECT v.id, v.profile_json, v.profile_sha256,
                        p.id AS provider_id, p.kind AS provider_kind,
                        p.name AS provider_name, p.endpoint_url, p.configuration_json
-                FROM voice_profiles v
+                FROM narrator_profiles v
                 JOIN provider_instances p ON p.id = v.provider_instance_id
                 WHERE v.id = ? AND p.enabled = 1
                 """,
@@ -232,6 +276,46 @@ class GenerationRepository:
         result["profile"] = json.loads(result.pop("profile_json"))
         result["provider_configuration"] = json.loads(result.pop("configuration_json"))
         return result
+
+    def update_voice_profile(
+        self,
+        profile_id: str,
+        *,
+        provider_id: str,
+        profile: dict[str, Any],
+        profile_sha256: str,
+    ) -> None:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE narrator_profiles
+                SET provider_instance_id = ?, profile_json = ?, profile_sha256 = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    provider_id,
+                    json.dumps(profile, ensure_ascii=False, sort_keys=True),
+                    profile_sha256,
+                    profile_id,
+                ),
+            )
+        if cursor.rowcount != 1:
+            raise KeyError(f"Voice profile not found: {profile_id}")
+
+    def delete_voice_profile(self, profile_id: str) -> None:
+        with self.database.connect() as connection:
+            in_use = connection.execute(
+                "SELECT 1 FROM jobs WHERE narrator_profile_id = ? LIMIT 1",
+                (profile_id,),
+            ).fetchone()
+            if in_use:
+                raise ValueError("Delete generation jobs using this voice profile first")
+            cursor = connection.execute(
+                "DELETE FROM narrator_profiles WHERE id = ?", (profile_id,)
+            )
+        if cursor.rowcount != 1:
+            raise KeyError(f"Voice profile not found: {profile_id}")
 
     def create_job(
         self,
@@ -245,8 +329,13 @@ class GenerationRepository:
         with self.database.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO jobs(id, book_id, narration_plan_id, voice_profile_id, status)
-                VALUES (?, ?, ?, ?, 'ready')
+                INSERT INTO jobs(
+                    id, book_id, narration_plan_id, narrator_profile_id,
+                    voice_profile_snapshot_json, voice_profile_snapshot_sha256,
+                    status
+                )
+                SELECT ?, ?, ?, id, profile_json, profile_sha256, 'ready'
+                FROM narrator_profiles WHERE id = ?
                 """,
                 (job_id, book_id, plan_id, voice_profile_id),
             )
@@ -281,11 +370,14 @@ class GenerationRepository:
             row = connection.execute(
                 """
                 SELECT j.*, COALESCE(b.title, 'Untitled') AS book_title,
-                       v.profile_json, v.profile_sha256,
+                       COALESCE(j.voice_profile_snapshot_json, v.profile_json)
+                           AS profile_json,
+                       COALESCE(j.voice_profile_snapshot_sha256, v.profile_sha256)
+                           AS profile_sha256,
                        p.kind AS provider_kind, p.endpoint_url, p.configuration_json
                 FROM jobs j
                 JOIN books b ON b.id = j.book_id
-                JOIN voice_profiles v ON v.id = j.voice_profile_id
+                JOIN narrator_profiles v ON v.id = j.narrator_profile_id
                 JOIN provider_instances p ON p.id = v.provider_instance_id
                 WHERE j.id = ?
                 """,

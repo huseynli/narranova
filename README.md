@@ -59,7 +59,7 @@ prints the ID needed by the next command:
 PYTHONPATH=src python -m narranova provider-add-openmoss "Local MOSS" \
   http://127.0.0.1:8000/tts --data-dir ./data
 
-PYTHONPATH=src python -m narranova voice-create-openmoss BOOK_ID PROVIDER_ID \
+PYTHONPATH=src python -m narranova voice-create-openmoss PROVIDER_ID \
   --reference ./approved-reference.wav \
   --instruction "A warm, restrained fiction audiobook narrator." \
   --data-dir ./data
@@ -85,12 +85,13 @@ PYTHONPATH=src python -m narranova web --data-dir ./data
 
 Open `http://127.0.0.1:8787`. The web interface supports EPUB upload, library
 and narration-plan review, per-section narration inclusion, a dedicated TTS
-connections page, and a Voice Studio for comparing short OpenMOSS auditions.
-Voice Studio pairs an uploaded or previously saved reference with editable
-narration directions and test sentences. Users can regenerate takes, promote a
-chosen take into a named profile, and then select both the connection and voice
-profile on the separate narration setup page. Saving a profile removes its
-discarded draft audio. The interface also supports durable job creation,
+connections page, and a book-independent Voice Lab for comparing short
+OpenMOSS auditions. Voice Lab can begin from narration direction alone or from
+an uploaded, saved, or generated reference. Users can regenerate takes, promote
+a chosen take into a named reusable profile, and then select both the connection
+and voice profile on the separate narration setup page. Connections and profiles
+can be edited, renamed, or deleted. Saving a profile removes its discarded draft
+audio. The interface also supports durable job creation,
 background generation, pause/resume, status, and verified chunk playback.
 Saving section choices creates an immutable plan revision; existing jobs retain
 their original plan and new jobs use the latest revision. The server binds to

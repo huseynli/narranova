@@ -29,6 +29,10 @@ class ArtifactLayout:
         return self.root / "books"
 
     @property
+    def voices_root(self) -> Path:
+        return self.root / "voices"
+
+    @property
     def temporary_root(self) -> Path:
         return self.root / "tmp"
 
@@ -39,6 +43,7 @@ class ArtifactLayout:
     def initialize(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.books_root.mkdir(exist_ok=True)
+        self.voices_root.mkdir(exist_ok=True)
         self.temporary_root.mkdir(exist_ok=True)
 
     def book_root(self, book_id: str) -> Path:
@@ -56,9 +61,16 @@ class ArtifactLayout:
         safe_chunk_id = _validate_id(chunk_id, "chunk id")
         return self.book_root(book_id) / "chunks" / f"{safe_chunk_id}.wav"
 
-    def voice_reference(self, book_id: str, profile_id: str) -> Path:
+    def legacy_voice_reference(self, book_id: str, profile_id: str) -> Path:
         safe_profile_id = _validate_id(profile_id, "voice profile id")
         return self.book_root(book_id) / "voice" / safe_profile_id / "reference.wav"
+
+    def voice_profile_root(self, profile_id: str) -> Path:
+        return self.voices_root / _validate_id(profile_id, "voice profile id")
+
+    def voice_reference(self, profile_id: str, version_id: str = "reference") -> Path:
+        safe_version_id = _validate_id(version_id, "voice reference version id")
+        return self.voice_profile_root(profile_id) / f"{safe_version_id}.wav"
 
     def job_root(self, book_id: str, job_id: str) -> Path:
         safe_job_id = _validate_id(job_id, "job id")

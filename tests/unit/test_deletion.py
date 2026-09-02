@@ -33,7 +33,6 @@ def make_workspace(root: Path) -> dict[str, object]:
     profiles = VoiceProfiles(generation, layout, store)
     provider_id = profiles.add_openmoss_provider("Test MOSS", "http://moss.test:8000/tts")
     profile_id = profiles.create_openmoss_profile(
-        book_id=imported.book_id,
         provider_id=provider_id,
         reference_audio=reference,
         instruction="A careful narrator.",
@@ -54,6 +53,7 @@ def make_workspace(root: Path) -> dict[str, object]:
         "jobs": jobs,
         "book_id": imported.book_id,
         "job_id": job_id,
+        "profile_id": profile_id,
     }
 
 
@@ -106,6 +106,8 @@ class DeleteArtifactsTests(unittest.TestCase):
             deletion = workspace["deletion"]
             book_id = str(workspace["book_id"])
             job_id = str(workspace["job_id"])
+            profile_id = str(workspace["profile_id"])
+            profile_root = layout.voice_profile_root(profile_id)  # type: ignore[union-attr]
             book_root = layout.book_root(book_id)  # type: ignore[union-attr]
 
             deletion.book(book_id)  # type: ignore[union-attr]
@@ -115,6 +117,30 @@ class DeleteArtifactsTests(unittest.TestCase):
                 books.get_book(book_id)  # type: ignore[union-attr]
             with self.assertRaises(KeyError):
                 generation.get_job(job_id)  # type: ignore[union-attr]
+            self.assertTrue(profile_root.is_dir())
+            self.assertEqual(
+                generation.get_voice_and_provider(profile_id)["profile"]["name"],  # type: ignore[union-attr]
+                "Narrator profile",
+            )
+
+    def test_voice_profile_deletion_removes_its_global_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = make_workspace(Path(temporary))
+            generation = workspace["generation"]
+            layout = workspace["layout"]
+            deletion = workspace["deletion"]
+            job_id = str(workspace["job_id"])
+            profile_id = str(workspace["profile_id"])
+            profile_root = layout.voice_profile_root(profile_id)  # type: ignore[union-attr]
+
+            with self.assertRaisesRegex(ValueError, "generation jobs"):
+                deletion.voice_profile(profile_id)  # type: ignore[union-attr]
+            deletion.job(job_id)  # type: ignore[union-attr]
+            deletion.voice_profile(profile_id)  # type: ignore[union-attr]
+
+            self.assertFalse(profile_root.exists())
+            with self.assertRaises(KeyError):
+                generation.get_voice_and_provider(profile_id)  # type: ignore[union-attr]
 
     def test_active_jobs_cannot_be_deleted_with_their_book_or_audio(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

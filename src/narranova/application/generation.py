@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from narranova.application.planning import ChunkPlanner
+from narranova.application.provider_catalog import provider_type
 from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.audio import validate_wave
 from narranova.domain.narration import NarrationPlan, text_sha256
@@ -32,23 +33,51 @@ class VoiceProfiles:
         self.repository = repository
         self.layout = layout
         self.store = store
+        self._migrate_legacy_artifacts()
+
+    def add_provider(self, kind: str, name: str, endpoint_url: str) -> str:
+        definition = provider_type(kind)
+        if not name.strip():
+            raise ValueError("Connection name cannot be empty")
+        if definition.id == "openmoss":
+            OpenMossConfig(endpoint_url)
+        return self.repository.add_provider(definition.id, name.strip(), endpoint_url)
 
     def add_openmoss_provider(self, name: str, endpoint_url: str) -> str:
-        OpenMossConfig(endpoint_url)
+        return self.add_provider("openmoss", name, endpoint_url)
+
+    def update_provider(
+        self,
+        provider_id: str,
+        *,
+        kind: str,
+        name: str,
+        endpoint_url: str,
+    ) -> None:
+        definition = provider_type(kind)
         if not name.strip():
-            raise ValueError("Provider name cannot be empty")
-        return self.repository.add_openmoss_provider(name.strip(), endpoint_url)
+            raise ValueError("Connection name cannot be empty")
+        if definition.id == "openmoss":
+            OpenMossConfig(endpoint_url)
+        self.repository.update_provider(
+            provider_id,
+            kind=definition.id,
+            name=name.strip(),
+            endpoint_url=endpoint_url,
+        )
 
     def create_openmoss_profile(
         self,
         *,
-        book_id: str,
         provider_id: str,
         reference_audio: Path,
         instruction: str,
         name: str | None = None,
         language: str = "English",
     ) -> str:
+        provider = self.repository.get_provider(provider_id)
+        if provider["kind"] != "openmoss" or not provider["enabled"]:
+            raise ValueError("Choose an enabled OpenMOSS connection")
         if not instruction.strip():
             raise ValueError("Narrator instruction cannot be empty")
         if not reference_audio.is_file():
@@ -58,7 +87,7 @@ class VoiceProfiles:
         profile_name = (name or "Narrator profile").strip()
         if not profile_name:
             raise ValueError("Voice profile name cannot be empty")
-        destination = self.layout.voice_reference(book_id, profile_id)
+        destination = self.layout.voice_reference(profile_id)
         reference_hash = self.store.copy(reference_audio, destination)
         profile: dict[str, object] = {
             "kind": "openmoss",
@@ -72,7 +101,6 @@ class VoiceProfiles:
         try:
             self.repository.add_voice_profile(
                 profile_id=profile_id,
-                book_id=book_id,
                 provider_id=provider_id,
                 profile=profile,
                 profile_sha256=profile_hash,
@@ -82,6 +110,101 @@ class VoiceProfiles:
             shutil.rmtree(destination.parent, ignore_errors=True)
             raise
         return profile_id
+
+    def update_openmoss_profile(
+        self,
+        profile_id: str,
+        *,
+        provider_id: str,
+        instruction: str,
+        name: str,
+        language: str = "English",
+        reference_audio: Path | None = None,
+    ) -> None:
+        current = self.repository.get_voice_and_provider(profile_id)
+        provider = self.repository.get_provider(provider_id)
+        if provider["kind"] != "openmoss":
+            raise ValueError("This profile editor currently supports OpenMOSS profiles")
+        OpenMossConfig(str(provider["endpoint_url"]), **provider["configuration"])
+        if not name.strip():
+            raise ValueError("Voice profile name cannot be empty")
+        if not instruction.strip():
+            raise ValueError("Narrator instruction cannot be empty")
+        current_profile = current["profile"]
+        old_reference = self._artifact_path(current_profile["reference_artifact_path"])
+        destination = old_reference
+        created_reference: Path | None = None
+        if reference_audio is not None:
+            validate_wave(reference_audio)
+            destination = self.layout.voice_reference(
+                profile_id, f"reference-{uuid.uuid4().hex}"
+            )
+            self.store.copy(reference_audio, destination)
+            created_reference = destination
+        reference_hash = self.store.sha256(destination)
+        profile: dict[str, object] = {
+            "kind": "openmoss",
+            "name": name.strip(),
+            "instruction": instruction.strip(),
+            "language": language.strip() or "English",
+            "reference_artifact_path": destination.relative_to(self.layout.root).as_posix(),
+            "reference_sha256": reference_hash,
+        }
+        profile_hash = hashlib.sha256(_canonical_json(profile).encode("utf-8")).hexdigest()
+        try:
+            self.repository.update_voice_profile(
+                profile_id,
+                provider_id=provider_id,
+                profile=profile,
+                profile_sha256=profile_hash,
+            )
+        except Exception:
+            if created_reference is not None:
+                created_reference.unlink(missing_ok=True)
+            raise
+        # Keep earlier approved references because existing generation jobs store
+        # immutable profile snapshots that may still point to those WAV files.
+
+    def _migrate_legacy_artifacts(self) -> None:
+        for stored in self.repository.list_voice_profiles():
+            profile = dict(stored.profile)
+            relative = profile.get("reference_artifact_path")
+            if not relative:
+                continue
+            source = self._artifact_path(str(relative))
+            destination = self.layout.voice_reference(stored.id)
+            if source == destination:
+                continue
+            if not source.is_file():
+                continue
+            validate_wave(source)
+            source_hash = self.store.sha256(source)
+            if source_hash != profile.get("reference_sha256"):
+                continue
+            copied_hash = self.store.copy(source, destination)
+            profile["reference_artifact_path"] = destination.relative_to(
+                self.layout.root
+            ).as_posix()
+            profile["reference_sha256"] = copied_hash
+            profile_hash = hashlib.sha256(_canonical_json(profile).encode("utf-8")).hexdigest()
+            try:
+                self.repository.update_voice_profile(
+                    stored.id,
+                    provider_id=stored.provider_id,
+                    profile=profile,
+                    profile_sha256=profile_hash,
+                )
+            except Exception:
+                destination.unlink(missing_ok=True)
+                raise
+            source.unlink(missing_ok=True)
+            shutil.rmtree(source.parent, ignore_errors=True)
+
+    def _artifact_path(self, relative_path: str) -> Path:
+        path = (self.layout.root / relative_path).resolve()
+        if not path.is_relative_to(self.layout.root):
+            raise RuntimeError("Stored artifact path escapes the data directory")
+        return path
 
 
 class GenerationJobs:
@@ -106,8 +229,6 @@ class GenerationJobs:
         provider_id: str | None = None,
     ) -> str:
         voice = self.generation.get_voice_and_provider(voice_profile_id)
-        if voice["book_id"] != book_id:
-            raise ValueError("Voice profile belongs to a different book")
         if provider_id is not None and voice["provider_id"] != provider_id:
             raise ValueError("Voice profile does not belong to the selected TTS connection")
         plan_record = self.books.get_plan_record(book_id)
