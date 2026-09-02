@@ -1,0 +1,1 @@
+"""Narranova command-line interface."""
