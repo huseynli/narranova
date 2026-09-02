@@ -1,0 +1,1 @@
+"""Narranova application use cases."""
