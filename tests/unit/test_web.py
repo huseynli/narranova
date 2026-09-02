@@ -51,8 +51,11 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"workspace-heading full-page-heading", body)
             self.assertIn(b"No books yet", body)
             self.assertNotIn(b"Prepare your studio", body)
-            self.assertIn(b'<aside class="stack"><form class="import-card"', body)
+            self.assertIn(b'<aside class="stack"><form class="panel import-card"', body)
             self.assertIn(b"New book", body)
+            self.assertNotIn(b"Add a DRM-free book to your production library", body)
+            self.assertNotIn(b">Book file</label>", body)
+            self.assertIn(b'aria-label="Choose an EPUB book"', body)
             self.assertLess(body.index(b"Import an EPUB"), body.index(b"Activity"))
             self.assertTrue(any(name == "Set-Cookie" for name, _ in headers))
 
@@ -256,6 +259,8 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b'<span class="count">01</span>', voices)
             self.assertLess(voices.index(b"Build a custom pair"), voices.index(b"Your profiles"))
             self.assertLess(voices.index(b"Your profiles"), voices.index(b"Built-in narrator pairs"))
+            self.assertIn(b'class="panel start-studio"', voices)
+            self.assertIn(b'class="start-studio-actions"', voices)
 
             status, audio_headers, audio = request(app, "/default-voices/01/audio")
             self.assertEqual(status, "200 OK")

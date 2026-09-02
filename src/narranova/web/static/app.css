@@ -120,22 +120,11 @@ h3 { margin: 0; font-size: 16px; }
 .full-page-heading > div > p:last-child { max-width: none; }
 .import-card {
   display: grid;
-  gap: 13px;
-  padding: 20px;
-  border-radius: 12px;
-  background: var(--ink);
-  box-shadow: var(--shadow);
-  color: white;
 }
-.import-card-copy h2 { margin: 5px 0 7px; color: white; }
-.import-card-copy > p:last-child { margin: 0; color: #bfc8c3; font-size: 11px; line-height: 1.5; }
-.import-card label { color: #d9dfdb; }
-.import-actions { display: flex; align-items: center; gap: 10px; }
+.import-actions { display: flex; align-items: center; gap: 10px; padding: 24px; }
 .import-card input[type=file] {
+  flex: 1;
   min-width: 0;
-  border-color: #58625f;
-  background: #232c2a;
-  color: #cbd2cf;
 }
 .stack .import-actions { align-items: stretch; flex-direction: column; }
 .stack .import-card button { width: 100%; }
@@ -378,29 +367,16 @@ button.primary:hover, .button.primary:hover, .primary:hover { background: var(--
 .voice-library-stack { display: grid; gap: 36px; }
 .start-studio {
   position: static;
-  display: grid;
-  grid-template-columns: auto minmax(0,1fr) auto;
+}
+.start-studio-actions {
+  display: flex;
   align-items: center;
-  gap: 22px;
-  padding: 24px 28px;
-  background: var(--ink);
-  color: white;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px;
 }
-.start-studio h2 { margin: 5px 0 7px; color: white; font-size: 27px; }
-.start-studio-copy > p:last-child { max-width: 680px; margin: 0; color: #bfc8c3; line-height: 1.5; }
+.start-studio-actions > p { max-width: 760px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .start-studio form { padding: 0; }
-.start-studio label { color: #dfe5e1; }
-.studio-glyph {
-  display: grid;
-  place-items: center;
-  width: 55px;
-  height: 55px;
-  margin-bottom: 0;
-  border: 1px solid #4a5551;
-  border-radius: 50%;
-  color: #f18a64;
-  font: 26px Georgia, serif;
-}
 .builtin-library { margin-bottom: 0; }
 .builtin-voice-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
 .builtin-voice-card {
@@ -729,7 +705,7 @@ footer { padding: 26px; border-top: 1px solid var(--line); color: var(--muted); 
   .connection-builder form { grid-template-columns: 1fr; }
   .connection-builder label:last-of-type { grid-column: auto; }
   .connection-builder button { width: 100%; }
-  .start-studio { grid-template-columns: 1fr; justify-items: start; }
+  .start-studio-actions { align-items: stretch; flex-direction: column; }
   .start-studio form, .start-studio form button { width: 100%; }
   .audition-form > .form-row, .audition-form > fieldset, .audition-form > button { margin-right: 16px; margin-left: 16px; }
   .chunk-row { align-items: stretch; flex-direction: column; }
