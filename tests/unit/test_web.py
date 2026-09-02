@@ -54,7 +54,7 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b'<aside class="stack"><form class="panel import-card"', body)
             self.assertIn(b"New book", body)
             self.assertIn(b"data-theme-toggle", body)
-            self.assertIn(b"narranova-theme", body)
+            self.assertIn(b'<script src="/static/theme.js"></script>', body)
             self.assertNotIn(b"Add a DRM-free book to your production library", body)
             self.assertNotIn(b">Book file</label>", body)
             self.assertIn(b'aria-label="Choose an EPUB book"', body)
@@ -99,6 +99,12 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(status, "200 OK")
             self.assertIn(b'localStorage.setItem("narranova-theme"', script)
             self.assertIn(b"narranova_theme=", script)
+            self.assertIn(("Content-Type", "text/javascript; charset=utf-8"), headers)
+
+            status, headers, bootstrap = request(app, "/static/theme.js")
+            self.assertEqual(status, "200 OK")
+            self.assertIn(b'localStorage.getItem("narranova-theme"', bootstrap)
+            self.assertIn(b"document.documentElement.dataset.theme", bootstrap)
             self.assertIn(("Content-Type", "text/javascript; charset=utf-8"), headers)
 
     def test_csrf_protected_provider_form_persists_to_sqlite(self) -> None:

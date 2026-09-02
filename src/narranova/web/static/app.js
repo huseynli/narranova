@@ -36,7 +36,11 @@ function applyTheme(theme, persist = false) {
 }
 
 if (themeToggle) {
-  applyTheme(document.documentElement.dataset.theme || "light");
+  applyTheme(
+    document.documentElement.dataset.theme ||
+      storedTheme() ||
+      (colorScheme.matches ? "dark" : "light")
+  );
   themeToggle.addEventListener("click", () => {
     applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true);
   });
