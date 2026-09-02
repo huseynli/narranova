@@ -52,7 +52,8 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"No books yet", body)
             self.assertNotIn(b"Prepare your studio", body)
             self.assertIn(b'<aside class="stack"><form class="import-card"', body)
-            self.assertLess(body.index(b"Add a DRM-free EPUB"), body.index(b"Activity"))
+            self.assertIn(b"New book", body)
+            self.assertLess(body.index(b"Import an EPUB"), body.index(b"Activity"))
             self.assertTrue(any(name == "Set-Cookie" for name, _ in headers))
 
     def test_jobs_workspace_has_requested_navigation_and_status_sections(self) -> None:
@@ -65,6 +66,7 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"Every narration run in one place", body)
             self.assertIn(b"jobs-heading full-page-heading", body)
             self.assertNotIn(b"Back to library", body)
+            self.assertEqual(body.count(b"Job state"), 4)
             for label in (b"Active", b"Recent", b"Finished", b"Stopped"):
                 self.assertIn(label, body)
             self.assertNotIn(b"Local studio", body)
@@ -234,6 +236,8 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"Connect your voice engine", connections)
             self.assertIn(b'class="page-heading full-page-heading"', connections)
             self.assertIn(b'class="connections-stack"', connections)
+            self.assertIn(b"Configured engines", connections)
+            self.assertIn(b'<span class="count">01</span>', connections)
             self.assertLess(
                 connections.index(b"Add a TTS engine"),
                 connections.index(b"Saved connections"),

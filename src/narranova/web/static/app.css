@@ -119,21 +119,25 @@ h3 { margin: 0; font-size: 16px; }
 .full-page-heading h1,
 .full-page-heading > div > p:last-child { max-width: none; }
 .import-card {
+  display: grid;
+  gap: 13px;
   padding: 20px;
   border-radius: 12px;
   background: var(--ink);
   box-shadow: var(--shadow);
   color: white;
 }
-.import-card label { margin-bottom: 10px; color: #d9dfdb; }
-.import-card > div { display: flex; align-items: center; gap: 10px; }
+.import-card-copy h2 { margin: 5px 0 7px; color: white; }
+.import-card-copy > p:last-child { margin: 0; color: #bfc8c3; font-size: 11px; line-height: 1.5; }
+.import-card label { color: #d9dfdb; }
+.import-actions { display: flex; align-items: center; gap: 10px; }
 .import-card input[type=file] {
   min-width: 0;
   border-color: #58625f;
   background: #232c2a;
   color: #cbd2cf;
 }
-.stack .import-card > div { align-items: stretch; flex-direction: column; }
+.stack .import-actions { align-items: stretch; flex-direction: column; }
 .stack .import-card button { width: 100%; }
 .panel {
   overflow: hidden;
@@ -163,8 +167,7 @@ h3 { margin: 0; font-size: 16px; }
   gap: 18px;
   align-items: start;
 }
-.jobs-section > header { align-items: flex-start; }
-.jobs-section > header h2 { margin-top: 7px; font-size: 38px; }
+.jobs-section > header h2 { margin-top: 5px; }
 .jobs-section > header p:not(.eyebrow) { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
 .stack { display: grid; gap: 24px; }
 .stat-strip {
@@ -716,7 +719,7 @@ footer { padding: 26px; border-top: 1px solid var(--line); color: var(--muted); 
   .topbar nav a { flex: 1; text-align: center; }
   .shell { padding-top: 30px; }
   .page-heading, .book-head, .job-head, .studio-heading { align-items: flex-start; flex-direction: column; }
-  .import-card > div, .job-actions { align-items: stretch; flex-direction: column; }
+  .import-actions, .job-actions { align-items: stretch; flex-direction: column; }
   .import-card button, .job-actions button { width: 100%; }
   .stat-strip { grid-template-columns: 1fr 1fr; }
   .lab-progress { grid-template-columns: 1fr; }
