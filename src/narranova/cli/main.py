@@ -11,6 +11,7 @@ from typing import Sequence
 from wsgiref.simple_server import WSGIServer
 
 from narranova import __version__
+from narranova.application.assembly import AudioAssembler
 from narranova.application.generation import GenerationJobs, VoiceProfiles
 from narranova.application.ingest import ImportBook
 from narranova.artifacts import ArtifactLayout, ArtifactStore
@@ -113,6 +114,18 @@ def build_parser() -> argparse.ArgumentParser:
     pause_parser.add_argument("job_id")
     pause_parser.add_argument("--data-dir", help="persistent data directory")
 
+    assemble_parser = commands.add_parser(
+        "job-assemble", help="build chapter audio, narration map, and M4B"
+    )
+    assemble_parser.add_argument("job_id")
+    assemble_parser.add_argument("--data-dir", help="persistent data directory")
+
+    artifacts_parser = commands.add_parser(
+        "job-artifacts", help="list downloadable artifacts for a generation job"
+    )
+    artifacts_parser.add_argument("job_id")
+    artifacts_parser.add_argument("--data-dir", help="persistent data directory")
+
     web_parser = commands.add_parser("web", help="run the local Narranova web interface")
     web_parser.add_argument("--host", default="127.0.0.1")
     web_parser.add_argument("--port", type=int, default=8787)
@@ -213,6 +226,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "job-pause":
             generation_repository.request_pause(args.job_id)
             print(f"Pause requested for generation job {args.job_id}")
+            return 0
+        if args.command == "job-assemble":
+            result = AudioAssembler(
+                generation_repository, layout, ArtifactStore(settings.data_dir)
+            ).run(args.job_id)
+            print(
+                f"Built {result.chapter_count} chapter(s) and "
+                f"{result.audiobook_path} ({result.duration_seconds:.1f}s)"
+            )
+            return 0
+        if args.command == "job-artifacts":
+            generation_repository.get_job(args.job_id)
+            artifacts = generation_repository.list_job_artifacts(args.job_id)
+            if not artifacts:
+                print("No assembled artifacts.")
+            for artifact in artifacts:
+                print(
+                    f"{artifact.id}  {artifact.kind}  "
+                    f"{artifact.byte_size} bytes  {artifact.relative_path}"
+                )
             return 0
         raise AssertionError(f"Unhandled command: {args.command}")
     except (EpubError, FileNotFoundError, KeyError, RuntimeError, ValueError) as exc:

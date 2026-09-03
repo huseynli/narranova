@@ -332,9 +332,10 @@ class GenerationJobs:
             if self.generation.job_status(job_id) == "pause_requested":
                 self.generation.mark_paused(job_id)
                 return
-            if chunk.status == "completed" and self._completed_chunk_is_valid(chunk):
+            replacing_completed_audio = chunk.status == "completed"
+            if replacing_completed_audio and self._completed_chunk_is_valid(chunk):
                 continue
-            if chunk.status == "completed":
+            if replacing_completed_audio:
                 self.generation.reset_chunk(job_id, chunk.database_id)
             text_path = self._artifact_path(chunk.text_artifact_path)
             text = text_path.read_text(encoding="utf-8").rstrip("\n")
@@ -359,6 +360,8 @@ class GenerationJobs:
                     result.audio_sha256,
                     result.duration_seconds,
                 )
+                if replacing_completed_audio:
+                    self._invalidate_outputs(job_id, chunk.chapter_index)
             except Exception as exc:
                 self.generation.fail_chunk(job_id, chunk.database_id, str(exc))
                 raise
@@ -418,11 +421,21 @@ class GenerationJobs:
                 regenerated_hash,
                 result.duration_seconds,
             )
+            self._invalidate_outputs(job_id, chunk.chapter_index)
             self.generation.finish_chunk_regeneration(job_id)
         except Exception as exc:
             temporary.unlink(missing_ok=True)
             self.generation.fail_chunk_regeneration(job_id, chunk.database_id, str(exc))
             raise
+
+    def _invalidate_outputs(self, job_id: str, chapter_index: int) -> None:
+        for relative_path in self.generation.invalidate_job_outputs(
+            job_id, chapter_index
+        ):
+            try:
+                self._artifact_path(relative_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _artifact_path(self, relative_path: str) -> Path:
         path = (self.layout.root / relative_path).resolve()

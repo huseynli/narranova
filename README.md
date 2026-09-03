@@ -41,6 +41,9 @@ PYTHONPATH=src python -m unittest discover -s tests/unit -v
 - Provider-sized chunk planning with content-loss verification
 - Dedicated external OpenMOSS streaming-PCM adapter
 - WAV validation before atomic artifact promotion
+- Lossless chapter-WAV assembly with selective rebuilds
+- Source-mapped narration-map export
+- FFmpeg-backed chapterized M4B export with metadata and cover art
 
 The OpenMOSS adapter deliberately preserves `stream=true`, PCM output,
 `stream_chunk_frames=16`, and the 6,000-token default. Reference cloning never
@@ -75,6 +78,17 @@ whose hashes and audio frames still validate. From another shell,
 `job-pause JOB_ID` requests a pause after the current provider request finishes;
 running `job-run JOB_ID` resumes it.
 
+After every chunk is complete, build and inspect the final deliverables:
+
+```console
+PYTHONPATH=src python -m narranova job-assemble JOB_ID --data-dir ./data
+PYTHONPATH=src python -m narranova job-artifacts JOB_ID --data-dir ./data
+```
+
+M4B export requires `ffmpeg` and `ffprobe` on the Narranova host. Chapter WAVs
+and the narration map are retained if M4B encoding fails, so the build can be
+retried after the tools are installed.
+
 ## Web interface
 
 Run the local server against the same data directory used by the CLI:
@@ -98,7 +112,8 @@ and copied reference WAV. Profiles used by unfinished jobs are visibly marked an
 protected from deletion until those jobs complete or are deleted; deleting the
 profile afterward removes its own files without breaking completed jobs. Saving a
 profile removes its discarded draft audio. The interface also supports durable job creation,
-background generation, pause/resume, status, and verified chunk playback.
+background generation, pause/resume, status, verified chunk playback, selective
+chunk regeneration, chapter assembly, and final artifact downloads.
 Saving section choices creates an immutable plan revision; existing jobs retain
 their original plan and new jobs use the latest revision. The server binds to
 loopback by default; use `--host` deliberately when exposing it to a trusted

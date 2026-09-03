@@ -530,6 +530,75 @@ class WebAppTests(unittest.TestCase):
             )
             self.assertEqual(partial, audio_path.read_bytes()[:16])
 
+    def test_completed_job_offers_assembly_and_downloadable_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "book.epub"
+            make_epub(source)
+            app = create_web_app(root / "data")
+            imported = app.import_book.execute(source)
+            provider_id = app.profiles.add_openmoss_provider(
+                "Job MOSS", "http://moss.test:8000/tts"
+            )
+            job_id = app.jobs.create(imported.book_id, "builtin:01", provider_id)
+            for chunk in app.generation.list_chunks(job_id):
+                audio_path = app.layout.job_chunk_master(
+                    imported.book_id, job_id, chunk.id
+                )
+                make_wave(audio_path)
+                app.generation.complete_chunk(
+                    job_id,
+                    chunk.database_id,
+                    audio_path.relative_to(app.layout.root).as_posix(),
+                    app.store.sha256(audio_path),
+                    0.01,
+                )
+            app.generation.complete_job(job_id)
+            audiobook = app.layout.job_audiobook(imported.book_id, job_id)
+            audiobook.parent.mkdir(parents=True, exist_ok=True)
+            audiobook.write_bytes(b"test m4b")
+            artifact_id = app.generation.record_artifact(
+                book_id=imported.book_id,
+                job_id=job_id,
+                kind="audiobook",
+                relative_path=audiobook.relative_to(app.layout.root).as_posix(),
+                sha256=app.store.sha256(audiobook),
+                byte_size=audiobook.stat().st_size,
+                metadata={"chapter_count": 2, "duration_seconds": 1.0},
+            )
+
+            status, _, page = request(app, f"/jobs/{job_id}")
+
+            self.assertEqual(status, "200 OK")
+            self.assertIn(b"Audiobook files", page)
+            self.assertIn(b"Chapterized audiobook", page)
+            self.assertIn(b"Rebuild audiobook", page)
+            self.assertIn(f"/jobs/{job_id}/assemble".encode(), page)
+            self.assertIn(
+                f"/jobs/{job_id}/artifacts/{artifact_id}/download".encode(), page
+            )
+
+            status, headers, content = request(
+                app, f"/jobs/{job_id}/artifacts/{artifact_id}/download"
+            )
+            self.assertEqual(status, "200 OK")
+            self.assertIn(("Content-Type", "audio/mp4"), headers)
+            self.assertIn(
+                (
+                    "Content-Disposition",
+                    'attachment; filename="The Example Book.m4b"',
+                ),
+                headers,
+            )
+            self.assertEqual(content, b"test m4b")
+
+            status, _, state_body = request(app, f"/jobs/{job_id}/status")
+            self.assertEqual(status, "200 OK")
+            state = json.loads(state_body)
+            self.assertTrue(state["can_assemble"])
+            self.assertTrue(state["has_audiobook"])
+            self.assertEqual(state["artifacts"][0]["kind"], "audiobook")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,8 +25,10 @@ class DeleteArtifacts:
 
     def generated_chunk(self, job_id: str, chunk_id: str) -> str:
         job = self.generation.get_job(job_id)
-        if job["status"] in {"generating", "pause_requested"}:
-            raise ValueError("Pause the generation job before deleting its audio")
+        if job["status"] in {"generating", "pause_requested", "assembling"}:
+            raise ValueError(
+                "Pause generation or wait for audiobook assembly before deleting audio"
+            )
         chunk = self.generation.get_chunk(job_id, chunk_id)
         if chunk.status == "generating":
             raise ValueError("An actively generating chunk cannot be deleted")
@@ -38,12 +40,21 @@ class DeleteArtifacts:
             self._restore(staged, audio)
             raise
         self._discard(staged)
+        for relative_path in self.generation.invalidate_job_outputs(
+            job_id, chunk.chapter_index
+        ):
+            try:
+                self._artifact(relative_path).unlink(missing_ok=True)
+            except OSError:
+                pass
         return str(job["book_id"])
 
     def job(self, job_id: str) -> str:
         job = self.generation.get_job(job_id)
-        if job["status"] in {"generating", "pause_requested"}:
-            raise ValueError("Pause the generation job before deleting it")
+        if job["status"] in {"generating", "pause_requested", "assembling"}:
+            raise ValueError(
+                "Pause generation or wait for audiobook assembly before deleting it"
+            )
         job_root = self.layout.job_root(str(job["book_id"]), job_id)
         staged = self._stage(job_root, "job")
         try:

@@ -15,6 +15,9 @@ from narranova.persistence.database import Database
 class StoredChunk:
     database_id: str
     id: str
+    chapter_index: int
+    chunk_index: int
+    unit_ids: tuple[str, ...]
     status: str
     attempts: int
     text_sha256: str
@@ -59,6 +62,17 @@ class UnattemptedCompletedChunk:
     job_id: str
     database_id: str
     audio_artifact_path: str
+
+
+@dataclass(frozen=True)
+class StoredArtifact:
+    id: str
+    kind: str
+    relative_path: str
+    sha256: str
+    byte_size: int
+    chapter_index: int | None
+    metadata: dict[str, Any]
 
 
 class GenerationRepository:
@@ -211,7 +225,9 @@ class GenerationRepository:
         with self.database.connect() as connection:
             row = connection.execute(
                 """
-                SELECT id AS database_id, logical_id AS id, status, attempts,
+                SELECT id AS database_id, logical_id AS id,
+                       chapter_index, chunk_index, unit_ids_json,
+                       status, attempts,
                        text_sha256, text_artifact_path, audio_artifact_path,
                        audio_sha256, duration_seconds
                 FROM chunks WHERE job_id = ? AND id = ?
@@ -220,7 +236,7 @@ class GenerationRepository:
             ).fetchone()
         if row is None:
             raise KeyError(f"Chunk not found: {chunk_id}")
-        return StoredChunk(**dict(row))
+        return self._stored_chunk(row)
 
     def list_unattempted_completed_chunks(self) -> list[UnattemptedCompletedChunk]:
         with self.database.connect() as connection:
@@ -394,13 +410,19 @@ class GenerationRepository:
             row = connection.execute(
                 """
                 SELECT j.*, COALESCE(b.title, 'Untitled') AS book_title,
+                       b.author AS book_author, b.language AS book_language,
+                       b.source_artifact_path,
+                       np.artifact_path AS plan_artifact_path,
+                       np.plan_sha256, np.revision AS plan_revision,
                        COALESCE(j.voice_profile_snapshot_json, v.profile_json)
                            AS profile_json,
                        COALESCE(j.voice_profile_snapshot_sha256, v.profile_sha256)
                            AS profile_sha256,
-                       p.kind AS provider_kind, p.endpoint_url, p.configuration_json
+                       p.name AS provider_name, p.kind AS provider_kind,
+                       p.endpoint_url, p.configuration_json
                 FROM jobs j
                 JOIN books b ON b.id = j.book_id
+                LEFT JOIN narration_plans np ON np.id = j.narration_plan_id
                 LEFT JOIN narrator_profiles v ON v.id = j.narrator_profile_id
                 JOIN provider_instances p
                   ON p.id = COALESCE(j.provider_instance_id, v.provider_instance_id)
@@ -465,7 +487,9 @@ class GenerationRepository:
         with self.database.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id AS database_id, logical_id AS id, status, attempts,
+                SELECT id AS database_id, logical_id AS id,
+                       chapter_index, chunk_index, unit_ids_json,
+                       status, attempts,
                        text_sha256, text_artifact_path,
                        audio_artifact_path, audio_sha256, duration_seconds
                 FROM chunks WHERE job_id = ?
@@ -473,7 +497,13 @@ class GenerationRepository:
                 """,
                 (job_id,),
             ).fetchall()
-        return [StoredChunk(**dict(row)) for row in rows]
+        return [self._stored_chunk(row) for row in rows]
+
+    @staticmethod
+    def _stored_chunk(row: object) -> StoredChunk:
+        values = dict(row)
+        values["unit_ids"] = tuple(json.loads(values.pop("unit_ids_json")))
+        return StoredChunk(**values)
 
     def recover_interrupted(self, job_id: str) -> None:
         with self.database.connect() as connection:
@@ -486,6 +516,16 @@ class GenerationRepository:
                 "WHERE id = ? AND status IN ('generating', 'failed')",
                 (job_id,),
             )
+
+    def recover_interrupted_assemblies(self) -> int:
+        """Make packaging jobs retryable after the serving process stopped."""
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET status = 'failed', error_message = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE status = 'assembling'",
+                ("Audiobook assembly was interrupted. Build it again.",),
+            )
+        return cursor.rowcount
 
     def job_status(self, job_id: str) -> str:
         with self.database.connect() as connection:
@@ -674,6 +714,145 @@ class GenerationRepository:
                 (job_id,),
             )
 
+    def begin_assembly(self, job_id: str) -> None:
+        with self.database.connect() as connection:
+            incomplete = connection.execute(
+                "SELECT COUNT(*) FROM chunks WHERE job_id = ? AND status != 'completed'",
+                (job_id,),
+            ).fetchone()[0]
+            if incomplete:
+                raise ValueError("Every audio chunk must be completed before assembly")
+            cursor = connection.execute(
+                "UPDATE jobs SET status = 'assembling', error_message = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ? "
+                "AND status IN ('completed', 'failed')",
+                (job_id,),
+            )
+        if cursor.rowcount != 1:
+            status = self.job_status(job_id)
+            if status != "assembling":
+                raise ValueError("Only a completed generation job can be assembled")
+
+    def fail_job(self, job_id: str, message: str) -> None:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET status = 'failed', error_message = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (message, job_id),
+            )
+        if cursor.rowcount != 1:
+            raise KeyError(f"Generation job not found: {job_id}")
+
+    def record_artifact(
+        self,
+        *,
+        book_id: str,
+        job_id: str,
+        kind: str,
+        relative_path: str,
+        sha256: str,
+        byte_size: int,
+        metadata: dict[str, Any],
+        chapter_index: int | None = None,
+    ) -> str:
+        artifact_id = uuid.uuid4().hex
+        metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO artifacts(
+                    id, book_id, job_id, kind, relative_path, sha256,
+                    byte_size, metadata_json, chapter_index
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(book_id, relative_path) DO UPDATE SET
+                    job_id = excluded.job_id,
+                    kind = excluded.kind,
+                    sha256 = excluded.sha256,
+                    byte_size = excluded.byte_size,
+                    metadata_json = excluded.metadata_json,
+                    chapter_index = excluded.chapter_index,
+                    created_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    artifact_id,
+                    book_id,
+                    job_id,
+                    kind,
+                    relative_path,
+                    sha256,
+                    byte_size,
+                    metadata_json,
+                    chapter_index,
+                ),
+            )
+            row = connection.execute(
+                "SELECT id FROM artifacts WHERE book_id = ? AND relative_path = ?",
+                (book_id, relative_path),
+            ).fetchone()
+        return str(row["id"])
+
+    def list_job_artifacts(self, job_id: str) -> list[StoredArtifact]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, kind, relative_path, sha256, byte_size,
+                       chapter_index, metadata_json
+                FROM artifacts WHERE job_id = ?
+                ORDER BY CASE kind
+                    WHEN 'chapter_audio' THEN 0
+                    WHEN 'audiobook' THEN 1
+                    WHEN 'narration_map' THEN 2
+                    ELSE 3 END,
+                    chapter_index, created_at
+                """,
+                (job_id,),
+            ).fetchall()
+        return [self._stored_artifact(row) for row in rows]
+
+    def get_job_artifact(self, job_id: str, artifact_id: str) -> StoredArtifact:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, kind, relative_path, sha256, byte_size,
+                       chapter_index, metadata_json
+                FROM artifacts WHERE job_id = ? AND id = ?
+                """,
+                (job_id, artifact_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Output artifact not found: {artifact_id}")
+        return self._stored_artifact(row)
+
+    def invalidate_job_outputs(self, job_id: str, chapter_index: int) -> list[str]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT relative_path FROM artifacts
+                WHERE job_id = ? AND (
+                    (kind = 'chapter_audio' AND chapter_index = ?)
+                    OR kind IN ('audiobook', 'narration_map')
+                )
+                """,
+                (job_id, chapter_index),
+            ).fetchall()
+            connection.execute(
+                """
+                DELETE FROM artifacts
+                WHERE job_id = ? AND (
+                    (kind = 'chapter_audio' AND chapter_index = ?)
+                    OR kind IN ('audiobook', 'narration_map')
+                )
+                """,
+                (job_id, chapter_index),
+            )
+        return [str(row["relative_path"]) for row in rows]
+
+    @staticmethod
+    def _stored_artifact(row: object) -> StoredArtifact:
+        values = dict(row)
+        values["metadata"] = json.loads(values.pop("metadata_json"))
+        return StoredArtifact(**values)
+
     def finish_chunk_regeneration(self, job_id: str) -> None:
         with self.database.connect() as connection:
             job = connection.execute(
@@ -734,8 +913,10 @@ class GenerationRepository:
             ).fetchone()
             if row is None:
                 raise KeyError(f"Generation job not found: {job_id}")
-            if row["status"] in {"generating", "pause_requested"}:
-                raise ValueError("Pause the generation job before deleting it")
+            if row["status"] in {"generating", "pause_requested", "assembling"}:
+                raise ValueError(
+                    "Pause generation or wait for audiobook assembly before deleting it"
+                )
             connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         return str(row["book_id"])
 
@@ -744,7 +925,8 @@ class GenerationRepository:
             row = connection.execute(
                 """
                 SELECT 1 FROM jobs
-                WHERE book_id = ? AND status IN ('generating', 'pause_requested')
+                WHERE book_id = ?
+                  AND status IN ('generating', 'pause_requested', 'assembling')
                 LIMIT 1
                 """,
                 (book_id,),

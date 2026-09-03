@@ -20,6 +20,7 @@ from narranova.application.default_voices import (
     default_voice_pair,
     default_voice_pairs,
 )
+from narranova.application.assembly import AudioAssembler
 from narranova.application.deletion import DeleteArtifacts
 from narranova.application.generation import GenerationJobs, VoiceProfiles
 from narranova.application.ingest import ImportBook
@@ -33,7 +34,7 @@ from narranova.domain.narration import NarrationPlan
 from narranova.epub import EpubParser
 from narranova.persistence import Database
 from narranova.persistence.books import BookRepository
-from narranova.persistence.generation import GenerationRepository
+from narranova.persistence.generation import GenerationRepository, StoredArtifact
 
 
 MAX_REQUEST_BYTES = 128 * 1024 * 1024
@@ -47,8 +48,9 @@ class Upload:
 
 
 class JobSupervisor:
-    def __init__(self, jobs: GenerationJobs) -> None:
+    def __init__(self, jobs: GenerationJobs, assembler: AudioAssembler) -> None:
         self.jobs = jobs
+        self.assembler = assembler
         self._lock = threading.Lock()
         self._active: dict[str, str] = {}
 
@@ -92,6 +94,25 @@ class JobSupervisor:
         with self._lock:
             return self._active.get(job_id) == "chunk"
 
+    def is_assembling(self, job_id: str) -> bool:
+        with self._lock:
+            return self._active.get(job_id) == "assembly"
+
+    def assemble(self, job_id: str) -> bool:
+        with self._lock:
+            if job_id in self._active:
+                return False
+            self._active[job_id] = "assembly"
+        try:
+            self.assembler.prepare(job_id)
+        except Exception:
+            with self._lock:
+                self._active.pop(job_id, None)
+            raise
+        thread = threading.Thread(target=self._assemble, args=(job_id,), daemon=True)
+        thread.start()
+        return True
+
     def _run(self, job_id: str) -> None:
         try:
             self.jobs.run(job_id, prepared=True)
@@ -112,6 +133,16 @@ class JobSupervisor:
             with self._lock:
                 self._active.pop(job_id, None)
 
+    def _assemble(self, job_id: str) -> None:
+        try:
+            self.assembler.run(job_id, prepared=True)
+        except Exception:
+            # The assembler records durable failures for the UI.
+            pass
+        finally:
+            with self._lock:
+                self._active.pop(job_id, None)
+
 
 class NarranovaWebApp:
     def __init__(
@@ -125,6 +156,7 @@ class NarranovaWebApp:
         revise_plan: ReviseNarrationPlan,
         profiles: VoiceProfiles,
         jobs: GenerationJobs,
+        assembler: AudioAssembler,
         deletion: DeleteArtifacts,
         voice_studio: VoiceStudio,
     ) -> None:
@@ -137,10 +169,11 @@ class NarranovaWebApp:
         self.revise_plan = revise_plan
         self.profiles = profiles
         self.jobs = jobs
+        self.assembler = assembler
         self.deletion = deletion
         self.voice_studio = voice_studio
         self.default_voices = default_voice_pairs()
-        self.supervisor = JobSupervisor(jobs)
+        self.supervisor = JobSupervisor(jobs, assembler)
 
     def __call__(self, environ: dict[str, object], start_response: StartResponse) -> Iterable[bytes]:
         method = str(environ.get("REQUEST_METHOD", "GET")).upper()
@@ -259,6 +292,14 @@ class NarranovaWebApp:
                 return self._html(start_response, self._job(parts[1], environ, csrf), set_cookie)
             if method == "GET" and len(parts) == 3 and parts[0] == "jobs" and parts[2] == "status":
                 return self._job_state(start_response, parts[1])
+            if (
+                method == "GET"
+                and len(parts) == 5
+                and parts[0] == "jobs"
+                and parts[2] == "artifacts"
+                and parts[4] == "download"
+            ):
+                return self._artifact_download(start_response, parts[1], parts[3])
             if method == "GET" and len(parts) == 3 and parts[0] == "books" and parts[2] == "delete":
                 book = self.books.get_book(parts[1])
                 return self._html(
@@ -448,6 +489,10 @@ class NarranovaWebApp:
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "pause":
             self.generation.request_pause(parts[1])
             return self._redirect(start_response, f"/jobs/{parts[1]}?notice=Pause+requested")
+        if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "assemble":
+            started = self.supervisor.assemble(parts[1])
+            notice = "Audiobook+build+started" if started else "Job+is+already+busy"
+            return self._redirect(start_response, f"/jobs/{parts[1]}?notice={notice}")
         if (
             len(parts) == 5
             and parts[0] == "jobs"
@@ -743,18 +788,68 @@ class NarranovaWebApp:
         percent = round((completed / len(chunks)) * 100) if chunks else 0
         status = str(job["status"])
         regenerating = self.supervisor.is_regenerating(job_id)
+        assembling = status == "assembling" or self.supervisor.is_assembling(job_id)
+        all_completed = bool(chunks) and completed == len(chunks)
+        artifacts = self._visible_outputs(job_id)
+        has_audiobook = any(artifact.kind == "audiobook" for artifact in artifacts)
         regeneration_disabled = status in {"generating", "pause_requested", "assembling"}
         chunk_rows = "".join(
             f"""<article class="chunk-row" data-chunk-id="{self._e(chunk.database_id)}"><div><span class="mono">{self._e(chunk.id)}</span><strong data-chunk-status>{self._e(chunk.status)}</strong><small data-chunk-meta>{chunk.attempts} attempt{'s' if chunk.attempts != 1 else ''}{f' · {chunk.duration_seconds:.1f}s' if chunk.duration_seconds else ''}</small></div><div class="chunk-actions" data-chunk-actions>{self._chunk_actions(job_id, chunk.database_id, csrf, regeneration_disabled) if chunk.status == 'completed' else ''}</div></article>"""
             for chunk in chunks
         )
-        startable = status in {"ready", "failed", "paused"}
+        startable = status in {"ready", "failed", "paused"} and not all_completed
         start_label = "Resume generation" if status in {"failed", "paused"} else "Start generation"
-        controls = f"""<form method="post" action="/jobs/{self._e(job_id)}/run" data-job-start{' hidden' if not startable else ''}>{self._csrf(csrf)}<button class="primary" data-job-start-label>{start_label}</button></form><span class="running-mark" data-job-running{' hidden' if status not in {'generating', 'assembling'} else ''}><i></i><b data-job-running-label>{'Regenerating chunk' if regenerating else 'Generation in progress'}</b></span><form method="post" action="/jobs/{self._e(job_id)}/pause" data-job-pause{' hidden' if status != 'generating' or regenerating else ''}>{self._csrf(csrf)}<button>Pause after chunk</button></form><span class="pause-mark" data-job-pause-requested{' hidden' if status != 'pause_requested' else ''}>Pause requested · finishing current chunk</span><span class="complete-mark" data-job-complete{' hidden' if status != 'completed' else ''}>✓ Generation complete</span><a class="danger-link job-delete" href="/jobs/{self._e(job_id)}/delete">Delete job</a>"""
+        running_label = (
+            "Building audiobook"
+            if assembling
+            else "Regenerating chunk"
+            if regenerating
+            else "Generation in progress"
+        )
+        controls = f"""<form method="post" action="/jobs/{self._e(job_id)}/run" data-job-start{' hidden' if not startable else ''}>{self._csrf(csrf)}<button class="primary" data-job-start-label>{start_label}</button></form><span class="running-mark" data-job-running{' hidden' if status not in {'generating', 'assembling'} else ''}><i></i><b data-job-running-label>{running_label}</b></span><form method="post" action="/jobs/{self._e(job_id)}/pause" data-job-pause{' hidden' if status != 'generating' or regenerating else ''}>{self._csrf(csrf)}<button>Pause after chunk</button></form><span class="pause-mark" data-job-pause-requested{' hidden' if status != 'pause_requested' else ''}>Pause requested · finishing current chunk</span><span class="complete-mark" data-job-complete{' hidden' if status != 'completed' else ''}>✓ Generation complete</span><a class="danger-link job-delete" href="/jobs/{self._e(job_id)}/delete">Delete job</a>"""
         error_message = str(job.get("error_message") or "")
         error = f'<div class="alert" data-job-error{"" if error_message else " hidden"}>{self._e(error_message)}</div>'
-        body = f"""<a class="back" href="/books/{self._e(job['book_id'])}">← Back to book</a><section class="job-head full-page-heading"><div><p class="eyebrow">Generation job</p><h1>{self._e(job_id[:12])}</h1><p data-job-summary>{completed} of {len(chunks)} chunks complete</p></div><span class="status status-{self._e(status)}" data-job-status>{self._e(status)}</span></section>{error}<section class="panel progress-panel" data-job-monitor data-job-id="{self._e(job_id)}" data-csrf="{self._e(csrf)}"><div class="progress-copy"><strong data-job-percent>{percent}%</strong><span>verified audio</span></div><div class="progress"><i data-job-progress-bar style="width:{percent}%"></i></div><div class="job-actions">{controls}</div></section><section class="panel chunks"><header><div><p class="eyebrow">Artifacts</p><h2>Audio chunks</h2></div><span class="count">{len(chunks):02d}</span></header>{chunk_rows}</section>"""
+        output_rows = self._output_rows(job_id, artifacts)
+        assemble_allowed = all_completed and status in {"completed", "failed"}
+        assemble_label = "Rebuild audiobook" if has_audiobook else "Build audiobook"
+        empty_output = (
+            "No deliverables yet. Build the audiobook to create them."
+            if all_completed
+            else "Complete every chunk, then build the audiobook."
+        )
+        output_panel = f"""<section class="panel outputs"><header><div><p class="eyebrow">Deliverables</p><h2>Audiobook files</h2></div><span class="count" data-output-count>{len(artifacts):02d}</span></header><div data-output-artifacts>{output_rows or f'<div class="empty">{empty_output}</div>'}</div><div class="output-build"><form method="post" action="/jobs/{self._e(job_id)}/assemble" data-job-assemble{' hidden' if not assemble_allowed else ''}>{self._csrf(csrf)}<button class="primary" data-job-assemble-label>{assemble_label}</button></form><p>Builds chapter WAVs, a source-mapped narration file, and a chapterized M4B.</p></div></section>"""
+        body = f"""<a class="back" href="/books/{self._e(job['book_id'])}">← Back to book</a><section class="job-head full-page-heading"><div><p class="eyebrow">Generation job</p><h1>{self._e(job_id[:12])}</h1><p data-job-summary>{completed} of {len(chunks)} chunks complete</p></div><span class="status status-{self._e(status)}" data-job-status>{self._e(status)}</span></section>{error}<section class="panel progress-panel" data-job-monitor data-job-id="{self._e(job_id)}" data-csrf="{self._e(csrf)}"><div class="progress-copy"><strong data-job-percent>{percent}%</strong><span>verified audio</span></div><div class="progress"><i data-job-progress-bar style="width:{percent}%"></i></div><div class="job-actions">{controls}</div></section>{output_panel}<section class="panel chunks"><header><div><p class="eyebrow">Artifacts</p><h2>Audio chunks</h2></div><span class="count">{len(chunks):02d}</span></header>{chunk_rows}</section>"""
         return self._layout("Generation", body, environ)
+
+    def _visible_outputs(self, job_id: str) -> list[StoredArtifact]:
+        return [
+            artifact
+            for artifact in self.generation.list_job_artifacts(job_id)
+            if artifact.kind in {"chapter_audio", "audiobook", "narration_map"}
+        ]
+
+    def _output_rows(self, job_id: str, artifacts: list[StoredArtifact]) -> str:
+        rows = []
+        for artifact in artifacts:
+            if artifact.kind == "chapter_audio":
+                label = str(
+                    artifact.metadata.get("title")
+                    or f"Chapter {artifact.chapter_index}"
+                )
+                kind = "Chapter audio"
+            elif artifact.kind == "audiobook":
+                label = "Chapterized audiobook"
+                kind = "M4B"
+            else:
+                label = "Narration map"
+                kind = "JSON"
+            rows.append(
+                f'<article class="output-row"><div><strong>{self._e(label)}</strong>'
+                f'<small>{self._e(kind)} · {self._format_bytes(artifact.byte_size)}</small>'
+                f'</div><a class="button" href="/jobs/{self._e(job_id)}/artifacts/'
+                f'{self._e(artifact.id)}/download">Download</a></article>'
+            )
+        return "".join(rows)
 
     def _chunk_actions(
         self, job_id: str, chunk_id: str, csrf: str, regeneration_disabled: bool
@@ -768,14 +863,32 @@ class NarranovaWebApp:
         chunks = self.generation.list_chunks(job_id)
         completed = sum(chunk.status == "completed" for chunk in chunks)
         percent = round((completed / len(chunks)) * 100) if chunks else 0
+        artifacts = self._visible_outputs(job_id)
         content = json.dumps(
             {
                 "status": job["status"],
                 "regenerating": self.supervisor.is_regenerating(job_id),
+                "assembling": self.supervisor.is_assembling(job_id),
                 "error": job.get("error_message") or "",
                 "completed": completed,
                 "total": len(chunks),
                 "percent": percent,
+                "can_assemble": bool(chunks)
+                and completed == len(chunks)
+                and job["status"] in {"completed", "failed"},
+                "has_audiobook": any(
+                    artifact.kind == "audiobook" for artifact in artifacts
+                ),
+                "artifacts": [
+                    {
+                        "id": artifact.id,
+                        "kind": artifact.kind,
+                        "title": artifact.metadata.get("title"),
+                        "chapter_index": artifact.chapter_index,
+                        "byte_size": artifact.byte_size,
+                    }
+                    for artifact in artifacts
+                ],
                 "chunks": [
                     {
                         "id": chunk.database_id,
@@ -865,6 +978,65 @@ class NarranovaWebApp:
             "audio/wav",
             headers=headers,
         )
+
+    def _artifact_download(
+        self,
+        start_response: StartResponse,
+        job_id: str,
+        artifact_id: str,
+    ) -> Iterable[bytes]:
+        artifact = self.generation.get_job_artifact(job_id, artifact_id)
+        path = self._artifact(artifact.relative_path)
+        if not path.is_file() or self.store.sha256(path) != artifact.sha256:
+            raise RuntimeError("Output artifact failed hash validation")
+        job = self.generation.get_job(job_id)
+        stem = self._safe_filename(str(job["book_title"]))
+        if artifact.kind == "chapter_audio":
+            validate_wave(path)
+            title = str(
+                artifact.metadata.get("title")
+                or f"Chapter {artifact.chapter_index}"
+            )
+            filename = f"{self._safe_filename(title)}.wav"
+            content_type = "audio/wav"
+        elif artifact.kind == "audiobook":
+            filename = f"{stem}.m4b"
+            content_type = "audio/mp4"
+        elif artifact.kind == "narration_map":
+            filename = f"{stem}-narration-map.json"
+            content_type = "application/json; charset=utf-8"
+        else:
+            raise KeyError("Output artifact is not downloadable")
+        headers = [
+            ("Content-Type", content_type),
+            ("Content-Disposition", f'attachment; filename="{filename}"'),
+            ("Content-Length", str(path.stat().st_size)),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Referrer-Policy", "same-origin"),
+            (
+                "Content-Security-Policy",
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "script-src 'self'; media-src 'self'",
+            ),
+        ]
+        start_response("200 OK", headers)
+
+        def stream() -> Iterable[bytes]:
+            with path.open("rb") as source:
+                while block := source.read(1024 * 1024):
+                    yield block
+
+        return stream()
+
+    @staticmethod
+    def _safe_filename(value: str) -> str:
+        safe = "".join(
+            character
+            for character in value
+            if character.isascii()
+            and (character.isalnum() or character in {" ", "-", "_", "."})
+        ).strip(" .")
+        return safe or "Narranova audiobook"
 
     @staticmethod
     def _audio_range(header: str, size: int) -> tuple[int, int] | None:
@@ -994,6 +1166,15 @@ class NarranovaWebApp:
     def _e(value: object) -> str:
         return html.escape(str(value), quote=True)
 
+    @staticmethod
+    def _format_bytes(size: int) -> str:
+        value = float(size)
+        for unit in ("B", "KB", "MB", "GB"):
+            if value < 1024 or unit == "GB":
+                return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+            value /= 1024
+        return f"{size} B"
+
     def _html(self, start_response: StartResponse, content: str, cookie: str | None) -> Iterable[bytes]:
         headers = [("Content-Type", "text/html; charset=utf-8")]
         if cookie:
@@ -1051,9 +1232,11 @@ def create_web_app(data_dir: str | Path | None = None) -> NarranovaWebApp:
     database.initialize()
     books = BookRepository(database)
     generation = GenerationRepository(database)
+    generation.recover_interrupted_assemblies()
     store = ArtifactStore(settings.data_dir)
     profiles = VoiceProfiles(generation, layout, store)
     jobs = GenerationJobs(books, generation, layout, store)
+    assembler = AudioAssembler(generation, layout, store)
     return NarranovaWebApp(
         settings,
         books,
@@ -1064,6 +1247,7 @@ def create_web_app(data_dir: str | Path | None = None) -> NarranovaWebApp:
         ReviseNarrationPlan(books, layout, store),
         profiles,
         jobs,
+        assembler,
         DeleteArtifacts(books, generation, layout),
         VoiceStudio(generation, profiles, layout, store),
     )

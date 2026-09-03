@@ -87,6 +87,31 @@ class ArtifactLayout:
     def job_voice_reference(self, book_id: str, job_id: str) -> Path:
         return self.job_root(book_id, job_id) / "voice" / "reference.wav"
 
+    def job_chapter_audio(self, book_id: str, job_id: str, chapter_index: int) -> Path:
+        if chapter_index < 0:
+            raise ValueError("Chapter index cannot be negative")
+        return (
+            self.job_root(book_id, job_id)
+            / "output"
+            / "chapters"
+            / f"{chapter_index:04d}.wav"
+        )
+
+    def job_audiobook(self, book_id: str, job_id: str) -> Path:
+        return self.job_root(book_id, job_id) / "output" / "audiobook.m4b"
+
+    def job_narration_map(self, book_id: str, job_id: str) -> Path:
+        return self.job_root(book_id, job_id) / "output" / "narration-map.json"
+
+    def job_cover(self, book_id: str, job_id: str, suffix: str) -> Path:
+        safe_suffix = suffix.lower().lstrip(".")
+        if safe_suffix not in {"jpg", "jpeg", "png", "webp"}:
+            raise ValueError(f"Unsupported cover format: {suffix}")
+        return self.job_root(book_id, job_id) / "output" / f"cover.{safe_suffix}"
+
+    def job_assembly_temporary(self, job_id: str) -> Path:
+        return self.temporary_root / f"assembly-{_validate_id(job_id, 'job id')}"
+
     def voice_studio_draft(self, draft_id: str) -> Path:
         return self.voice_studio_root / _validate_id(draft_id, "voice studio draft id")
 

@@ -1,6 +1,6 @@
 # Narranova — Project Plan
 
-Last updated: 2026-09-01
+Last updated: 2026-09-02
 
 Product name: **Narranova**  
 Canonical domain: **narranova.app**  
@@ -433,6 +433,12 @@ Rules:
 Generated audio is first normalized into a validated internal master format.
 Provider responses never become final artifacts without verification.
 
+After all job chunks complete, the user explicitly starts an assembly run.
+Narranova concatenates compatible WAV masters without re-encoding, records
+chapter and book offsets in the narration map, then invokes external FFmpeg and
+FFprobe to create and validate the chapterized AAC M4B. A failed M4B encode
+retains verified chapter WAVs and the narration map for a safe retry.
+
 The application produces:
 
 - Independently replaceable chunk masters.
@@ -669,11 +675,11 @@ V1 is complete when all of the following are true:
     markers with verified timestamps.
 12. The output includes a narration map connecting audio chunks to EPUB source
     locations and text hashes.
-12. The default Docker deployment requires only the core container and one
-    persistent volume; Kokoro remains optional.
-13. No workflow depends on the bundled local MOSS runtime in this development
-    folder.
-14. Automated tests cover EPUB safety, plan integrity, provider payloads,
+13. The default Docker deployment requires only the core container and one
+   persistent volume; Kokoro remains optional.
+14. No workflow depends on the bundled local MOSS runtime in this development
+   folder.
+15. Automated tests cover EPUB safety, plan integrity, provider payloads,
     pause/resume recovery, retry behavior, audio validation, selective rebuilds,
     metadata, and M4B chapter output.
 

@@ -91,6 +91,62 @@ function addChunkActions(jobId, chunkId, container, regenerationDisabled) {
   container.append(audio, links);
 }
 
+function formatBytes(size) {
+  let value = Number(size);
+  for (const unit of ["B", "KB", "MB", "GB"]) {
+    if (value < 1024 || unit === "GB") {
+      return unit === "B" ? `${Math.round(value)} B` : `${value.toFixed(1)} ${unit}`;
+    }
+    value /= 1024;
+  }
+  return `${size} B`;
+}
+
+function updateOutputArtifacts(state) {
+  const container = document.querySelector("[data-output-artifacts]");
+  if (!container) return;
+  const artifacts = state.artifacts || [];
+  const signature = JSON.stringify(artifacts);
+  if (container.dataset.signature === signature) return;
+  container.dataset.signature = signature;
+  container.replaceChildren();
+  if (!artifacts.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = state.completed === state.total && state.total > 0
+      ? "No deliverables yet. Build the audiobook to create them."
+      : "Complete every chunk, then build the audiobook.";
+    container.append(empty);
+  } else {
+    artifacts.forEach((artifact) => {
+      const row = document.createElement("article");
+      row.className = "output-row";
+      const copy = document.createElement("div");
+      const title = document.createElement("strong");
+      const detail = document.createElement("small");
+      if (artifact.kind === "chapter_audio") {
+        title.textContent = artifact.title || `Chapter ${artifact.chapter_index}`;
+        detail.textContent = `Chapter audio · ${formatBytes(artifact.byte_size)}`;
+      } else if (artifact.kind === "audiobook") {
+        title.textContent = "Chapterized audiobook";
+        detail.textContent = `M4B · ${formatBytes(artifact.byte_size)}`;
+      } else {
+        title.textContent = "Narration map";
+        detail.textContent = `JSON · ${formatBytes(artifact.byte_size)}`;
+      }
+      copy.append(title, detail);
+      const download = document.createElement("a");
+      download.className = "button";
+      download.href = `/jobs/${encodeURIComponent(jobMonitor.dataset.jobId)}/artifacts/${encodeURIComponent(artifact.id)}/download`;
+      download.textContent = "Download";
+      row.append(copy, download);
+      container.append(row);
+    });
+  }
+  const count = document.querySelector("[data-output-count]");
+  if (count) count.textContent = String(artifacts.length).padStart(2, "0");
+}
+
 function updateJobPage(state) {
   const status = String(state.status || "ready");
   const statusLabel = document.querySelector("[data-job-status]");
@@ -112,18 +168,29 @@ function updateJobPage(state) {
   }
 
   const jobActive = ["generating", "pause_requested", "assembling"].includes(status);
-  const startable = ["ready", "failed", "paused"].includes(status);
+  const startable = ["ready", "failed", "paused"].includes(status)
+    && state.completed < state.total;
   setJobControl("start", startable);
   setJobControl("running", ["generating", "assembling"].includes(status));
   setJobControl("pause", status === "generating" && !state.regenerating);
   setJobControl("pause-requested", status === "pause_requested");
   setJobControl("complete", status === "completed");
+  setJobControl("assemble", Boolean(state.can_assemble));
   const runningLabel = document.querySelector("[data-job-running-label]");
   if (runningLabel) {
-    runningLabel.textContent = state.regenerating
+    runningLabel.textContent = state.assembling || status === "assembling"
+      ? "Building audiobook"
+      : state.regenerating
       ? "Regenerating chunk"
       : "Generation in progress";
   }
+  const assembleLabel = document.querySelector("[data-job-assemble-label]");
+  if (assembleLabel) {
+    assembleLabel.textContent = state.has_audiobook
+      ? "Rebuild audiobook"
+      : "Build audiobook";
+  }
+  updateOutputArtifacts(state);
   const startLabel = document.querySelector("[data-job-start-label]");
   if (startLabel) {
     startLabel.textContent = ["failed", "paused"].includes(status)

@@ -346,7 +346,7 @@ h3 { margin: 0; font-size: 16px; }
   white-space: nowrap;
 }
 .status-completed { background: var(--success-bg); color: var(--success-ink); }
-.status-generating { background: var(--running-bg); color: var(--running-ink); }
+.status-generating, .status-assembling { background: var(--running-bg); color: var(--running-ink); }
 .status-failed { background: var(--failure-bg); color: var(--failure-ink); }
 .status-paused, .status-pause_requested { background: var(--paused-bg); color: var(--paused-ink); }
 .next-step > a {
@@ -815,6 +815,26 @@ audio { width: 100%; height: 36px; }
 .chunk-regenerate:disabled { opacity: .42; cursor: not-allowed; }
 .chunk-download { color: var(--accent-dark); font-size: 11px; font-weight: 800; white-space: nowrap; }
 .chunk-download:hover { color: var(--ink); }
+.outputs { margin-bottom: 24px; }
+.output-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 15px 22px;
+  border-bottom: 1px solid var(--line);
+}
+.output-row > div { display: grid; gap: 4px; }
+.output-row small { color: var(--muted); }
+.output-row .button { min-height: 34px; padding: 7px 12px; }
+.output-build {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 22px;
+}
+.output-build form, .output-build p { margin: 0; }
+.output-build p { color: var(--muted); font-size: 11px; }
 .mono { color: var(--muted); font: 11px ui-monospace, monospace; }
 .complete-mark { color: var(--success-ink); font-weight: 700; }
 .notice, .alert { margin-bottom: 20px; padding: 13px 16px; border: 1px solid var(--notice-border); border-radius: 8px; background: var(--notice-bg); color: var(--notice-ink); }
@@ -858,6 +878,8 @@ footer { padding: 26px; border-top: 1px solid var(--line); color: var(--muted); 
   .chunk-row > div:first-child { grid-template-columns: 95px 1fr; }
   .chunk-row small { grid-column: 1/-1; }
   .chunk-actions { grid-template-columns: 1fr; }
+  .output-row, .output-build { align-items: stretch; flex-direction: column; }
+  .output-row .button, .output-build button { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
   * {

@@ -46,6 +46,20 @@ class ArtifactStore:
             temporary.unlink(missing_ok=True)
         return self.sha256(target)
 
+    def write_bytes(self, destination: Path, content: bytes) -> str:
+        target = self._validate_destination(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.tmp")
+        try:
+            with temporary.open("wb") as output:
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return self.sha256(target)
+
     @staticmethod
     def sha256(path: Path) -> str:
         digest = hashlib.sha256()
