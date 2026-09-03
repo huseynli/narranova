@@ -7,7 +7,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from narranova.artifacts import ArtifactLayout
+from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.persistence.books import BookRepository
 from narranova.persistence.generation import GenerationRepository
 
@@ -64,6 +64,45 @@ class DeleteArtifacts:
             raise
         self._discard(staged)
         return book_id
+
+    def compact_job(self, job_id: str) -> int:
+        """Remove editable chunk masters after the final audiobook is verified."""
+        job = self.generation.get_job(job_id)
+        if job["status"] in {"generating", "pause_requested", "assembling"}:
+            raise ValueError("Wait for active generation or assembly before finalizing")
+        audiobook_artifacts = [
+            artifact
+            for artifact in self.generation.list_job_artifacts(job_id)
+            if artifact.kind == "audiobook"
+        ]
+        if not audiobook_artifacts:
+            raise ValueError("Build and verify the audiobook before freeing source space")
+        audiobook_artifact = audiobook_artifacts[-1]
+        audiobook = self._artifact(audiobook_artifact.relative_path)
+        if not audiobook.is_file():
+            raise ValueError("The finished audiobook is missing; rebuild it before finalizing")
+        if ArtifactStore.sha256(audiobook) != audiobook_artifact.sha256:
+            raise ValueError("The finished audiobook failed verification; rebuild it first")
+        sources = [
+            self._artifact(chunk.audio_artifact_path)
+            for chunk in self.generation.list_chunks(job_id)
+            if chunk.audio_artifact_path
+        ]
+        staged: list[tuple[Path | None, Path]] = []
+        byte_size = 0
+        try:
+            for source in sources:
+                if source.is_file():
+                    byte_size += source.stat().st_size
+                staged.append((self._stage(source, "chunk-master"), source))
+            self.generation.compact_job_sources(job_id)
+        except Exception:
+            for temporary, source in reversed(staged):
+                self._restore(temporary, source)
+            raise
+        for temporary, _ in staged:
+            self._discard(temporary)
+        return byte_size
 
     def book(self, book_id: str) -> None:
         self.books.get_book(book_id)

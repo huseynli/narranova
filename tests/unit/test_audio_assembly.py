@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -12,13 +13,74 @@ from narranova.application.assembly import AudioAssembler
 from narranova.application.generation import GenerationJobs, VoiceProfiles
 from narranova.application.ingest import ImportBook
 from narranova.artifacts import ArtifactLayout, ArtifactStore
-from narranova.audio import FFmpegM4BEncoder, M4BChapter, assemble_wave, validate_wave
+from narranova.audio import FFmpegAudioMasters, FFmpegM4BEncoder, M4BChapter
 from narranova.epub import EpubParser
 from narranova.persistence import Database
 from narranova.persistence.books import BookRepository
 from narranova.persistence.generation import GenerationRepository
 from tests.unit.test_epub_ingest import make_epub
-from tests.unit.test_generation_jobs import FakeProvider, make_wave
+from tests.unit.test_generation_jobs import FakeAudioMasters, FakeProvider, make_wave
+
+
+class AudioMasterTests(unittest.TestCase):
+    def test_normalizer_builds_and_validates_a_mono_flac_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "provider.wav"
+            destination = root / "chunk.flac"
+            ffmpeg = root / "ffmpeg"
+            ffprobe = root / "ffprobe"
+            ffmpeg.touch()
+            ffprobe.touch()
+            make_wave(source)
+            commands: list[list[str]] = []
+
+            def runner(command, **kwargs):
+                commands.append(command)
+                if command[0] == str(ffmpeg):
+                    Path(command[-1]).write_bytes(b"test flac")
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                payload = {
+                    "streams": [
+                        {"codec_name": "flac", "channels": 1, "sample_rate": "48000"}
+                    ],
+                    "format": {"duration": "0.01"},
+                }
+                return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+            info = FFmpegAudioMasters(
+                str(ffmpeg), str(ffprobe), runner=runner
+            ).normalize(source, destination)
+
+            self.assertEqual(info.codec, "flac")
+            self.assertEqual(info.channels, 1)
+            self.assertEqual(info.sample_rate, 48_000)
+            self.assertEqual(destination.read_bytes(), b"test flac")
+            self.assertIn("-ac", commands[0])
+            self.assertEqual(commands[0][commands[0].index("-ac") + 1], "1")
+            self.assertFalse((root / ".chunk.part.flac").exists())
+
+    @unittest.skipUnless(
+        shutil.which("ffmpeg") and shutil.which("ffprobe"),
+        "FFmpeg runtime is not installed",
+    )
+    def test_real_normalizer_outputs_lossless_48khz_mono_flac(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "provider.wav"
+            destination = root / "chunk.flac"
+            with wave.open(str(source), "wb") as output:
+                output.setnchannels(2)
+                output.setsampwidth(2)
+                output.setframerate(48_000)
+                output.writeframes(b"\x01\x00\x01\x00" * 48_000)
+
+            info = FFmpegAudioMasters().normalize(source, destination)
+
+            self.assertEqual(info.codec, "flac")
+            self.assertEqual(info.channels, 1)
+            self.assertEqual(info.sample_rate, 48_000)
+            self.assertAlmostEqual(info.duration_seconds, 1.0, places=2)
 
 
 class FakeEncoder:
@@ -68,38 +130,23 @@ def assembly_workspace(root: Path, encoder: FakeEncoder):
     )
     provider = FakeProvider()
     jobs = GenerationJobs(
-        books, generation, layout, store, provider_factory=lambda job: provider
+        books,
+        generation,
+        layout,
+        store,
+        provider_factory=lambda job: provider,
+        masters=FakeAudioMasters(),
     )
     job_id = jobs.create(imported.book_id, profile_id)
     jobs.run(job_id)
-    assembler = AudioAssembler(generation, layout, store, encoder=encoder)
+    assembler = AudioAssembler(
+        generation,
+        layout,
+        store,
+        encoder=encoder,
+        masters=FakeAudioMasters(),
+    )
     return generation, layout, store, jobs, assembler, job_id
-
-
-class WaveAssemblyTests(unittest.TestCase):
-    def test_concatenates_compatible_waves_and_rejects_mismatched_audio(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            first = root / "first.wav"
-            second = root / "second.wav"
-            mismatch = root / "mismatch.wav"
-            destination = root / "chapter.wav"
-            make_wave(first, 120)
-            make_wave(second, 240)
-            make_wave(mismatch, 120)
-            # Re-create the mismatch at a different sample rate.
-            with wave.open(str(mismatch), "wb") as output:
-                output.setnchannels(1)
-                output.setsampwidth(2)
-                output.setframerate(16_000)
-                output.writeframes(b"\x01\x00" * 120)
-
-            result = assemble_wave([first, second], destination)
-
-            self.assertEqual(result.info.frames, 360)
-            self.assertEqual(validate_wave(destination).sample_rate, 24_000)
-            with self.assertRaisesRegex(ValueError, "sample_rate"):
-                assemble_wave([first, mismatch], root / "invalid.wav")
 
 
 class AudioAssemblerTests(unittest.TestCase):
@@ -116,7 +163,7 @@ class AudioAssemblerTests(unittest.TestCase):
 
             artifacts = generation.list_job_artifacts(job_id)
             kinds = [artifact.kind for artifact in artifacts]
-            self.assertEqual(kinds.count("chapter_audio"), 2)
+            self.assertNotIn("chapter_audio", kinds)
             self.assertIn("audiobook", kinds)
             self.assertIn("narration_map", kinds)
             self.assertIn("cover", kinds)
@@ -125,6 +172,10 @@ class AudioAssemblerTests(unittest.TestCase):
             self.assertEqual(generation.get_job(job_id)["status"], "completed")
             self.assertEqual(encoder.calls[0]["metadata"]["title"], "The Example Book")
             self.assertIsNotNone(encoder.calls[0]["cover"])
+            self.assertEqual(
+                sum(len(chapter.paths) for chapter in encoder.calls[0]["chapters"]),
+                len(generation.list_chunks(job_id)),
+            )
 
             narration_map = json.loads(result.narration_map_path.read_text(encoding="utf-8"))
             self.assertEqual(narration_map["schema_version"], 1)
@@ -135,27 +186,14 @@ class AudioAssemblerTests(unittest.TestCase):
             self.assertIn("element_id", first_unit)
 
             selected = generation.list_chunks(job_id)[0]
-            unaffected_index = generation.list_chunks(job_id)[-1].chapter_index
             jobs.regenerate_chunk(job_id, selected.database_id)
 
             remaining = generation.list_job_artifacts(job_id)
             self.assertNotIn("audiobook", [artifact.kind for artifact in remaining])
             self.assertNotIn("narration_map", [artifact.kind for artifact in remaining])
-            remaining_chapters = {
-                artifact.chapter_index
-                for artifact in remaining
-                if artifact.kind == "chapter_audio"
-            }
-            self.assertEqual(remaining_chapters, {unaffected_index})
-            self.assertFalse(
-                layout.job_chapter_audio(
-                    generation.get_job(job_id)["book_id"],
-                    job_id,
-                    selected.chapter_index,
-                ).exists()
-            )
+            self.assertEqual([artifact.kind for artifact in remaining], ["cover"])
 
-    def test_encoder_failure_is_durable_and_keeps_verified_chapter_outputs(self) -> None:
+    def test_encoder_failure_is_durable_and_keeps_verified_masters(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             encoder = FakeEncoder("FFmpeg is unavailable")
             generation, _, _, _, assembler, job_id = assembly_workspace(
@@ -169,10 +207,7 @@ class AudioAssemblerTests(unittest.TestCase):
             artifacts = generation.list_job_artifacts(job_id)
             self.assertEqual(job["status"], "failed")
             self.assertEqual(job["error_message"], "FFmpeg is unavailable")
-            self.assertEqual(
-                len([item for item in artifacts if item.kind == "chapter_audio"]),
-                2,
-            )
+            self.assertFalse(any(item.kind == "chapter_audio" for item in artifacts))
             self.assertTrue(any(item.kind == "narration_map" for item in artifacts))
             self.assertFalse(any(item.kind == "audiobook" for item in artifacts))
 
@@ -198,8 +233,8 @@ class AudioAssemblerTests(unittest.TestCase):
 class M4BMetadataTests(unittest.TestCase):
     def test_writes_exact_chapter_boundaries_and_escapes_metadata(self) -> None:
         chapters = [
-            M4BChapter("One; opening", Path("one.wav"), 0.0, 1.25),
-            M4BChapter("Two", Path("two.wav"), 1.25, 3.0),
+            M4BChapter("One; opening", (Path("one.flac"),), 0.0, 1.25),
+            M4BChapter("Two", (Path("two.flac"),), 1.25, 3.0),
         ]
 
         metadata = FFmpegM4BEncoder._metadata(chapters, {"title": "A=B"})
@@ -223,7 +258,7 @@ class M4BMetadataTests(unittest.TestCase):
                 chapters.append(
                     M4BChapter(
                         f"Chapter {index + 1}",
-                        path,
+                        (path,),
                         index * 0.01,
                         (index + 1) * 0.01,
                     )
@@ -266,6 +301,35 @@ class M4BMetadataTests(unittest.TestCase):
             self.assertIn("attached_pic", ffmpeg_command)
             self.assertIn("-f", ffmpeg_command)
             self.assertIn("ipod", ffmpeg_command)
+
+    @unittest.skipUnless(
+        shutil.which("ffmpeg") and shutil.which("ffprobe"),
+        "FFmpeg runtime is not installed",
+    )
+    def test_real_encoder_reads_flac_chunks_without_chapter_wavs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            masters = FFmpegAudioMasters()
+            paths = []
+            for index in range(2):
+                source = root / f"provider-{index}.wav"
+                destination = root / f"chunk-{index}.flac"
+                make_wave(source, 24_000)
+                paths.append(masters.normalize(source, destination).path)
+            chapters = [
+                M4BChapter("First", (paths[0],), 0.0, 1.0),
+                M4BChapter("Second", (paths[1],), 1.0, 2.0),
+            ]
+
+            result = FFmpegM4BEncoder().encode(
+                chapters,
+                root / "audiobook.m4b",
+                {"title": "Compact test"},
+                root / "workspace",
+            )
+
+            self.assertTrue(result.path.is_file())
+            self.assertAlmostEqual(result.duration_seconds, 2.0, delta=0.1)
 
 
 if __name__ == "__main__":

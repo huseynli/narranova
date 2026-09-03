@@ -147,6 +147,41 @@ function updateOutputArtifacts(state) {
   if (count) count.textContent = String(artifacts.length).padStart(2, "0");
 }
 
+function updateStorageState(state) {
+  const container = document.querySelector("[data-storage-policy]");
+  if (!container) return;
+  const signature = JSON.stringify([
+    Boolean(state.compacted),
+    Boolean(state.has_audiobook),
+    Number(state.editable_bytes || 0),
+  ]);
+  if (container.dataset.signature === signature) return;
+  container.dataset.signature = signature;
+  container.replaceChildren();
+  const copy = document.createElement("div");
+  const badge = document.createElement("span");
+  badge.className = state.compacted ? "status status-completed" : "status";
+  badge.textContent = state.compacted ? "Compact" : "Editable";
+  const title = document.createElement("strong");
+  const description = document.createElement("p");
+  if (state.compacted) {
+    title.textContent = "Finished files only";
+    description.textContent = "Lossless chunk masters were removed. The M4B and narration map remain.";
+  } else {
+    title.textContent = `${formatBytes(state.editable_bytes || 0)} of lossless chunk masters`;
+    description.textContent = "Keep these FLAC files for individual regeneration, or remove them after approving the M4B.";
+  }
+  copy.append(badge, title, description);
+  container.append(copy);
+  if (!state.compacted && state.has_audiobook && state.editable_bytes > 0) {
+    const action = document.createElement("a");
+    action.className = "button";
+    action.href = `/jobs/${encodeURIComponent(jobMonitor.dataset.jobId)}/compact`;
+    action.textContent = "Finalize and free space";
+    container.append(action);
+  }
+}
+
 function updateJobPage(state) {
   const status = String(state.status || "ready");
   const statusLabel = document.querySelector("[data-job-status]");
@@ -168,8 +203,9 @@ function updateJobPage(state) {
   }
 
   const jobActive = ["generating", "pause_requested", "assembling"].includes(status);
-  const startable = ["ready", "failed", "paused"].includes(status)
-    && state.completed < state.total;
+  const startable = (["ready", "failed", "paused"].includes(status)
+    && state.completed < state.total)
+    || (state.compacted && status === "completed");
   setJobControl("start", startable);
   setJobControl("running", ["generating", "assembling"].includes(status));
   setJobControl("pause", status === "generating" && !state.regenerating);
@@ -191,9 +227,12 @@ function updateJobPage(state) {
       : "Build audiobook";
   }
   updateOutputArtifacts(state);
+  updateStorageState(state);
   const startLabel = document.querySelector("[data-job-start-label]");
   if (startLabel) {
-    startLabel.textContent = ["failed", "paused"].includes(status)
+    startLabel.textContent = state.compacted
+      ? "Restore editable sources"
+      : ["failed", "paused"].includes(status)
       ? "Resume generation"
       : "Start generation";
   }
@@ -210,9 +249,10 @@ function updateJobPage(state) {
     if (metadata) {
       const attempts = `${chunk.attempts} attempt${chunk.attempts === 1 ? "" : "s"}`;
       const duration = chunk.duration ? ` · ${Number(chunk.duration).toFixed(1)}s` : "";
-      metadata.textContent = attempts + duration;
+      const format = chunk.audio_available ? " · lossless FLAC" : "";
+      metadata.textContent = attempts + duration + format;
     }
-    if (chunk.status === "completed") {
+    if (chunk.status === "completed" && chunk.audio_available) {
       const actions = row.querySelector("[data-chunk-actions]");
       if (actions) {
         addChunkActions(jobMonitor.dataset.jobId, chunk.id, actions, jobActive);

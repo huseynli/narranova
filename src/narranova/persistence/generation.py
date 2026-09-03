@@ -566,7 +566,7 @@ class GenerationRepository:
             cursor = connection.execute(
                 """
                 UPDATE jobs SET status = 'generating', error_message = NULL,
-                    updated_at = CURRENT_TIMESTAMP
+                    compacted_at = NULL, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status IN ('ready', 'failed', 'completed')
                 """,
                 (job_id,),
@@ -717,11 +717,20 @@ class GenerationRepository:
     def begin_assembly(self, job_id: str) -> None:
         with self.database.connect() as connection:
             incomplete = connection.execute(
-                "SELECT COUNT(*) FROM chunks WHERE job_id = ? AND status != 'completed'",
+                """
+                SELECT COUNT(*) FROM chunks
+                WHERE job_id = ? AND (
+                    status != 'completed'
+                    OR audio_artifact_path IS NULL
+                    OR audio_sha256 IS NULL
+                )
+                """,
                 (job_id,),
             ).fetchone()[0]
             if incomplete:
-                raise ValueError("Every audio chunk must be completed before assembly")
+                raise ValueError(
+                    "Every editable audio master must be available before assembly"
+                )
             cursor = connection.execute(
                 "UPDATE jobs SET status = 'assembling', error_message = NULL, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ? "
@@ -742,6 +751,43 @@ class GenerationRepository:
             )
         if cursor.rowcount != 1:
             raise KeyError(f"Generation job not found: {job_id}")
+
+    def compact_job_sources(self, job_id: str) -> list[str]:
+        """Forget editable chunk masters after a verified M4B exists."""
+        with self.database.connect() as connection:
+            job = connection.execute(
+                "SELECT status, compacted_at FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if job is None:
+                raise KeyError(f"Generation job not found: {job_id}")
+            if job["status"] != "completed":
+                raise ValueError("Only a completed audiobook can be finalized")
+            if job["compacted_at"] is not None:
+                raise ValueError("This audiobook has already been finalized")
+            audiobook = connection.execute(
+                "SELECT 1 FROM artifacts WHERE job_id = ? AND kind = 'audiobook'",
+                (job_id,),
+            ).fetchone()
+            if audiobook is None:
+                raise ValueError("Build and verify the M4B before freeing source storage")
+            rows = connection.execute(
+                "SELECT audio_artifact_path FROM chunks "
+                "WHERE job_id = ? AND audio_artifact_path IS NOT NULL",
+                (job_id,),
+            ).fetchall()
+            if not rows:
+                raise ValueError("This job has no editable audio masters to remove")
+            connection.execute(
+                "UPDATE chunks SET audio_artifact_path = NULL, audio_sha256 = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE job_id = ?",
+                (job_id,),
+            )
+            connection.execute(
+                "UPDATE jobs SET compacted_at = CURRENT_TIMESTAMP, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (job_id,),
+            )
+        return [str(row["audio_artifact_path"]) for row in rows]
 
     def record_artifact(
         self,

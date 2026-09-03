@@ -161,6 +161,7 @@ class DatabaseTests(unittest.TestCase):
                     (3, "global_narrator_profiles"),
                     (4, "self_contained_job_voices"),
                     (5, "output_artifacts"),
+                    (6, "job_storage"),
                 ],
             )
             self.assertTrue(

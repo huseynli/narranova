@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from narranova.cli.main import ThreadingWSGIServer
 from narranova.web import create_web_app
 from tests.unit.test_epub_ingest import make_epub
-from tests.unit.test_generation_jobs import make_wave
+from tests.unit.test_generation_jobs import FakeAudioMasters, make_wave
 
 
 def request(
@@ -161,7 +161,7 @@ class WebAppTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "book.epub"
             make_epub(source)
-            app = create_web_app(root / "data")
+            app = create_web_app(root / "data", masters=FakeAudioMasters())
             _, headers, _ = request(app)
             cookie = next(value for name, value in headers if name == "Set-Cookie")
             token = cookie.split(";", 1)[0].split("=", 1)[1]
@@ -453,7 +453,7 @@ class WebAppTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "book.epub"
             make_epub(source)
-            app = create_web_app(root / "data")
+            app = create_web_app(root / "data", masters=FakeAudioMasters())
             imported = app.import_book.execute(source)
             provider_id = app.profiles.add_openmoss_provider(
                 "Job MOSS", "http://moss.test:8000/tts"
@@ -510,9 +510,9 @@ class WebAppTests(unittest.TestCase):
 
             status, headers, audio = request(app, download_path)
             self.assertEqual(status, "200 OK")
-            self.assertIn(("Content-Type", "audio/wav"), headers)
+            self.assertIn(("Content-Type", "audio/flac"), headers)
             self.assertIn(
-                ("Content-Disposition", f'attachment; filename="{chunk.id}.wav"'),
+                ("Content-Disposition", f'attachment; filename="{chunk.id}.flac"'),
                 headers,
             )
             self.assertEqual(audio, audio_path.read_bytes())
@@ -567,12 +567,15 @@ class WebAppTests(unittest.TestCase):
                 metadata={"chapter_count": 2, "duration_seconds": 1.0},
             )
 
-            status, _, page = request(app, f"/jobs/{job_id}")
+            status, page_headers, page = request(app, f"/jobs/{job_id}")
 
             self.assertEqual(status, "200 OK")
             self.assertIn(b"Audiobook files", page)
             self.assertIn(b"Chapterized audiobook", page)
             self.assertIn(b"Rebuild audiobook", page)
+            self.assertIn(b"lossless chunk masters", page)
+            self.assertIn(b"Finalize and free space", page)
+            self.assertIn(f"/jobs/{job_id}/compact".encode(), page)
             self.assertIn(f"/jobs/{job_id}/assemble".encode(), page)
             self.assertIn(
                 f"/jobs/{job_id}/artifacts/{artifact_id}/download".encode(), page
@@ -597,7 +600,36 @@ class WebAppTests(unittest.TestCase):
             state = json.loads(state_body)
             self.assertTrue(state["can_assemble"])
             self.assertTrue(state["has_audiobook"])
+            self.assertFalse(state["compacted"])
+            self.assertGreater(state["editable_bytes"], 0)
             self.assertEqual(state["artifacts"][0]["kind"], "audiobook")
+
+            cookie = next(
+                value for name, value in page_headers if name == "Set-Cookie"
+            )
+            token = cookie.split(";", 1)[0].split("=", 1)[1]
+            status, response_headers, _ = request(
+                app,
+                f"/jobs/{job_id}/compact",
+                method="POST",
+                body=urlencode({"csrf": token}).encode(),
+                cookie=cookie,
+            )
+            self.assertEqual(status, "303 See Other")
+            self.assertIn(
+                "Finalized+and+freed",
+                next(value for name, value in response_headers if name == "Location"),
+            )
+            self.assertTrue(audiobook.is_file())
+            self.assertTrue(
+                all(
+                    chunk.audio_artifact_path is None
+                    for chunk in app.generation.list_chunks(job_id)
+                )
+            )
+            _, _, compact_page = request(app, f"/jobs/{job_id}")
+            self.assertIn(b"Finished files only", compact_page)
+            self.assertIn(b"Restore editable sources", compact_page)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Build chapter masters, a narration map, and a chapterized M4B for one job."""
+"""Build a narration map and chapterized M4B directly from FLAC masters."""
 
 from __future__ import annotations
 
@@ -9,10 +9,15 @@ from pathlib import Path
 from typing import Protocol
 
 from narranova.artifacts import ArtifactLayout, ArtifactStore
-from narranova.audio import FFmpegM4BEncoder, M4BChapter, assemble_wave, validate_wave
+from narranova.audio import (
+    AudioMasterInfo,
+    FFmpegAudioMasters,
+    FFmpegM4BEncoder,
+    M4BChapter,
+)
 from narranova.domain.narration import NarrationPlan
 from narranova.epub import EpubParser
-from narranova.persistence.generation import GenerationRepository, StoredArtifact, StoredChunk
+from narranova.persistence.generation import GenerationRepository, StoredChunk
 
 
 class M4BEncoder(Protocol):
@@ -24,6 +29,10 @@ class M4BEncoder(Protocol):
         workspace: Path,
         cover: Path | None = None,
     ) -> object: ...
+
+
+class AudioMasters(Protocol):
+    def validate(self, path: Path) -> AudioMasterInfo: ...
 
 
 @dataclass(frozen=True)
@@ -42,12 +51,14 @@ class AudioAssembler:
         store: ArtifactStore,
         encoder: M4BEncoder | None = None,
         epub_parser: EpubParser | None = None,
+        masters: AudioMasters | None = None,
     ) -> None:
         self.generation = generation
         self.layout = layout
         self.store = store
         self.encoder = encoder or FFmpegM4BEncoder()
         self.epub_parser = epub_parser or EpubParser()
+        self.masters = masters or FFmpegAudioMasters()
 
     def prepare(self, job_id: str) -> None:
         self.generation.begin_assembly(job_id)
@@ -76,51 +87,32 @@ class AudioAssembler:
         for chunk in chunks:
             grouped.setdefault(chunk.chapter_index, []).append(chunk)
         chapter_titles = {chapter.spine_index: chapter.title for chapter in plan.chapters}
-        existing = self._artifact_index(job_id)
         encoded_chapters: list[M4BChapter] = []
         chapter_records: list[dict[str, object]] = []
         book_offset = 0.0
         for chapter_index, chapter_chunks in grouped.items():
             title = chapter_titles.get(chapter_index, f"Chapter {chapter_index}")
-            chapter_path = self.layout.job_chapter_audio(
-                job["book_id"], job_id, chapter_index
-            )
-            sources = [self._verified_chunk(chunk) for chunk in chapter_chunks]
-            input_hashes = [str(chunk.audio_sha256) for chunk in chapter_chunks]
-            artifact = existing.get(("chapter_audio", chapter_index))
-            if not self._reusable_chapter(artifact, chapter_path, input_hashes):
-                assembled = assemble_wave(sources, chapter_path)
-                duration = assembled.info.duration_seconds
-                chapter_hash = self.store.sha256(chapter_path)
-                self._record(
-                    job,
-                    "chapter_audio",
-                    chapter_path,
-                    {
-                        "title": title,
-                        "duration_seconds": duration,
-                        "chunk_sha256s": input_hashes,
-                    },
-                    chapter_index,
-                )
-            else:
-                info = validate_wave(chapter_path)
-                duration = info.duration_seconds
-                chapter_hash = str(artifact.sha256)
+            verified = [
+                (chunk, self._verified_chunk(chunk)) for chunk in chapter_chunks
+            ]
+            duration = sum(info.duration_seconds for _, info in verified)
             chapter_start = book_offset
             chapter_end = chapter_start + duration
             encoded_chapters.append(
-                M4BChapter(title, chapter_path, chapter_start, chapter_end)
+                M4BChapter(
+                    title,
+                    tuple(info.path for _, info in verified),
+                    chapter_start,
+                    chapter_end,
+                )
             )
             chapter_records.append(
                 self._chapter_map(
                     plan,
                     chapter_index,
                     title,
-                    chapter_path,
-                    chapter_hash,
                     chapter_start,
-                    chapter_chunks,
+                    verified,
                 )
             )
             book_offset = chapter_end
@@ -161,43 +153,25 @@ class AudioAssembler:
             {
                 "duration_seconds": encoded_duration,
                 "chapter_count": len(encoded_chapters),
-                "chapter_sha256s": [self.store.sha256(item.path) for item in encoded_chapters],
+                "chunk_sha256s": [
+                    str(chunk.audio_sha256)
+                    for chapter_chunks in grouped.values()
+                    for chunk in chapter_chunks
+                ],
             },
         )
         return AssemblyResult(
             len(encoded_chapters), encoded_duration, audiobook_path, narration_map_path
         )
 
-    def _verified_chunk(self, chunk: StoredChunk) -> Path:
+    def _verified_chunk(self, chunk: StoredChunk) -> AudioMasterInfo:
         if not chunk.audio_artifact_path or not chunk.audio_sha256:
             raise RuntimeError(f"Chunk {chunk.id} has no verified audio")
         path = self._artifact(chunk.audio_artifact_path)
-        validate_wave(path)
+        info = self.masters.validate(path)
         if self.store.sha256(path) != chunk.audio_sha256:
             raise RuntimeError(f"Chunk {chunk.id} failed hash validation")
-        return path
-
-    def _reusable_chapter(
-        self,
-        artifact: StoredArtifact | None,
-        path: Path,
-        input_hashes: list[str],
-    ) -> bool:
-        if artifact is None or artifact.metadata.get("chunk_sha256s") != input_hashes:
-            return False
-        try:
-            validate_wave(path)
-            return self.store.sha256(path) == artifact.sha256
-        except (OSError, ValueError):
-            return False
-
-    def _artifact_index(
-        self, job_id: str
-    ) -> dict[tuple[str, int | None], StoredArtifact]:
-        return {
-            (artifact.kind, artifact.chapter_index): artifact
-            for artifact in self.generation.list_job_artifacts(job_id)
-        }
+        return info
 
     def _record(
         self,
@@ -248,18 +222,14 @@ class AudioAssembler:
         plan: NarrationPlan,
         chapter_index: int,
         title: str,
-        audio_path: Path,
-        audio_sha256: str,
         book_start: float,
-        chunks: list[StoredChunk],
+        chunks: list[tuple[StoredChunk, AudioMasterInfo]],
     ) -> dict[str, object]:
         units = {unit.id: unit for unit in plan.units}
         chapter_cursor = 0.0
         mapped_chunks = []
-        for chunk in chunks:
-            duration = validate_wave(
-                self._artifact(str(chunk.audio_artifact_path))
-            ).duration_seconds
+        for chunk, info in chunks:
+            duration = info.duration_seconds
             start = chapter_cursor
             end = start + duration
             mapped_chunks.append(
@@ -267,6 +237,8 @@ class AudioAssembler:
                     "id": chunk.id,
                     "text_sha256": chunk.text_sha256,
                     "audio_sha256": chunk.audio_sha256,
+                    "audio_format": "flac",
+                    "audio_artifact_path": chunk.audio_artifact_path,
                     "chapter_start_seconds": start,
                     "chapter_end_seconds": end,
                     "book_start_seconds": book_start + start,
@@ -288,8 +260,7 @@ class AudioAssembler:
         return {
             "spine_index": chapter_index,
             "title": title,
-            "audio_artifact_path": audio_path.relative_to(self.layout.root).as_posix(),
-            "audio_sha256": audio_sha256,
+            "master_sha256s": [str(chunk.audio_sha256) for chunk, _ in chunks],
             "book_start_seconds": book_start,
             "book_end_seconds": book_start + chapter_cursor,
             "chunks": mapped_chunks,

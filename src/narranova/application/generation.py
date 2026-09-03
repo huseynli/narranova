@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import uuid
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 from narranova.application.default_voices import (
     BUILTIN_VOICE_PREFIX,
@@ -17,7 +16,7 @@ from narranova.application.default_voices import (
 from narranova.application.planning import ChunkPlanner
 from narranova.application.provider_catalog import provider_type
 from narranova.artifacts import ArtifactLayout, ArtifactStore
-from narranova.audio import validate_wave
+from narranova.audio import AudioMasterInfo, FFmpegAudioMasters, validate_wave
 from narranova.domain.narration import NarrationPlan, text_sha256
 from narranova.persistence.books import BookRepository
 from narranova.persistence.generation import GenerationRepository
@@ -26,6 +25,12 @@ from narranova.providers import OpenMossConfig, OpenMossProvider, SynthesisReque
 
 def _canonical_json(value: dict[str, object]) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+class AudioMasters(Protocol):
+    def normalize(self, source: Path, destination: Path) -> AudioMasterInfo: ...
+
+    def validate(self, path: Path) -> AudioMasterInfo: ...
 
 
 class VoiceProfiles:
@@ -220,12 +225,14 @@ class GenerationJobs:
         layout: ArtifactLayout,
         store: ArtifactStore,
         provider_factory: Callable[[dict[str, object]], TTSProvider] | None = None,
+        masters: AudioMasters | None = None,
     ) -> None:
         self.books = books
         self.generation = generation
         self.layout = layout
         self.store = store
         self.provider_factory = provider_factory or self._openmoss_provider
+        self.masters = masters or FFmpegAudioMasters()
         self._materialize_job_voice_references()
         self._reset_legacy_reused_chunks()
 
@@ -313,6 +320,7 @@ class GenerationJobs:
         """Put a job into a visible running state before background execution."""
         self.generation.resume(job_id)
         self.generation.recover_interrupted(job_id)
+        self._remove_abandoned_provider_audio(job_id)
         self.generation.start_job(job_id)
 
     def run(self, job_id: str, *, prepared: bool = False) -> None:
@@ -342,29 +350,41 @@ class GenerationJobs:
             if text_sha256(text) != chunk.text_sha256:
                 raise RuntimeError(f"Synthesis text failed hash validation: {chunk.id}")
             destination = self.layout.job_chunk_master(job["book_id"], job_id, chunk.id)
+            provider_output = self.layout.job_chunk_temporary(
+                job_id, chunk.id, uuid.uuid4().hex
+            )
             self.generation.begin_chunk(job_id, chunk.database_id)
             try:
                 result = provider.synthesize(
                     SynthesisRequest(
                         text=text,
-                        destination=destination,
+                        destination=provider_output,
                         language=profile.get("language"),
                         instruction=profile["instruction"],
                         reference_audio=reference,
                     )
                 )
+                if result.audio_path.resolve() != provider_output.resolve():
+                    raise RuntimeError("TTS provider returned an unexpected audio path")
+                validate_wave(provider_output)
+                if self.store.sha256(provider_output) != result.audio_sha256:
+                    raise RuntimeError("Provider audio failed hash validation")
+                master = self.masters.normalize(provider_output, destination)
+                master_hash = self.store.sha256(destination)
                 self.generation.complete_chunk(
                     job_id,
                     chunk.database_id,
-                    result.audio_path.relative_to(self.layout.root).as_posix(),
-                    result.audio_sha256,
-                    result.duration_seconds,
+                    destination.relative_to(self.layout.root).as_posix(),
+                    master_hash,
+                    master.duration_seconds,
                 )
                 if replacing_completed_audio:
                     self._invalidate_outputs(job_id, chunk.chapter_index)
             except Exception as exc:
                 self.generation.fail_chunk(job_id, chunk.database_id, str(exc))
                 raise
+            finally:
+                provider_output.unlink(missing_ok=True)
         self.generation.complete_job(job_id)
 
     def prepare_chunk_regeneration(self, job_id: str, chunk_id: str) -> None:
@@ -383,8 +403,8 @@ class GenerationJobs:
         chunk = self.generation.get_chunk(job_id, chunk_id)
         profile = job["profile"]
         destination = self.layout.job_chunk_master(job["book_id"], job_id, chunk.id)
-        temporary = destination.with_name(
-            f".{destination.stem}.regenerating-{uuid.uuid4().hex}{destination.suffix}"
+        provider_output = self.layout.job_chunk_temporary(
+            job_id, chunk.id, uuid.uuid4().hex
         )
         try:
             if hashlib.sha256(_canonical_json(profile).encode("utf-8")).hexdigest() != job[
@@ -401,32 +421,33 @@ class GenerationJobs:
             result = self.provider_factory(job).synthesize(
                 SynthesisRequest(
                     text=text,
-                    destination=temporary,
+                    destination=provider_output,
                     language=profile.get("language"),
                     instruction=profile["instruction"],
                     reference_audio=reference,
                 )
             )
-            if result.audio_path.resolve() != temporary.resolve():
+            if result.audio_path.resolve() != provider_output.resolve():
                 raise RuntimeError("TTS provider returned an unexpected audio path")
-            validate_wave(temporary)
-            regenerated_hash = self.store.sha256(temporary)
-            if regenerated_hash != result.audio_sha256:
+            validate_wave(provider_output)
+            if self.store.sha256(provider_output) != result.audio_sha256:
                 raise RuntimeError("Regenerated audio failed hash validation")
-            os.replace(temporary, destination)
+            master = self.masters.normalize(provider_output, destination)
+            regenerated_hash = self.store.sha256(destination)
             self.generation.complete_chunk(
                 job_id,
                 chunk.database_id,
                 destination.relative_to(self.layout.root).as_posix(),
                 regenerated_hash,
-                result.duration_seconds,
+                master.duration_seconds,
             )
             self._invalidate_outputs(job_id, chunk.chapter_index)
             self.generation.finish_chunk_regeneration(job_id)
         except Exception as exc:
-            temporary.unlink(missing_ok=True)
             self.generation.fail_chunk_regeneration(job_id, chunk.database_id, str(exc))
             raise
+        finally:
+            provider_output.unlink(missing_ok=True)
 
     def _invalidate_outputs(self, job_id: str, chapter_index: int) -> None:
         for relative_path in self.generation.invalidate_job_outputs(
@@ -482,6 +503,18 @@ class GenerationJobs:
             ).hexdigest()
             self.generation.update_job_voice_snapshot(job["id"], profile, snapshot_hash)
 
+    def _remove_abandoned_provider_audio(self, job_id: str) -> None:
+        job = self.generation.get_job(job_id)
+        safe_job_id = str(job["id"])
+        self.layout.job_root(str(job["book_id"]), safe_job_id)
+        for path in self.layout.temporary_root.glob(
+            f"generation-{safe_job_id}-*.wav"
+        ):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def _valid_reference(self, path: Path, expected_hash: str) -> bool:
         try:
             validate_wave(path)
@@ -508,10 +541,16 @@ class GenerationJobs:
             return False
         path = self._artifact_path(chunk.audio_artifact_path)
         try:
-            validate_wave(path)
+            self.masters.validate(path)
             return self.store.sha256(path) == chunk.audio_sha256
         except (OSError, ValueError):
             return False
+
+    def verified_chunk_path(self, job_id: str, chunk_id: str) -> Path:
+        chunk = self.generation.get_chunk(job_id, chunk_id)
+        if not self._completed_chunk_is_valid(chunk):
+            raise ValueError("Chunk has no verified editable audio master")
+        return self._artifact_path(str(chunk.audio_artifact_path))
 
     @staticmethod
     def _openmoss_provider(job: dict[str, object]) -> TTSProvider:

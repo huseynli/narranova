@@ -1,15 +1,15 @@
 """Audio validation and assembly primitives."""
 
-from narranova.audio.assembly import AssembledWave, assemble_wave
 from narranova.audio.m4b import EncodedM4B, FFmpegM4BEncoder, M4BChapter
+from narranova.audio.masters import AudioMasterInfo, FFmpegAudioMasters
 from narranova.audio.validation import WaveInfo, validate_wave
 
 __all__ = [
-    "AssembledWave",
+    "AudioMasterInfo",
     "EncodedM4B",
+    "FFmpegAudioMasters",
     "FFmpegM4BEncoder",
     "M4BChapter",
     "WaveInfo",
-    "assemble_wave",
     "validate_wave",
 ]

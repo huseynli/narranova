@@ -12,6 +12,7 @@ from wsgiref.simple_server import WSGIServer
 
 from narranova import __version__
 from narranova.application.assembly import AudioAssembler
+from narranova.application.deletion import DeleteArtifacts
 from narranova.application.generation import GenerationJobs, VoiceProfiles
 from narranova.application.ingest import ImportBook
 from narranova.artifacts import ArtifactLayout, ArtifactStore
@@ -125,6 +126,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     artifacts_parser.add_argument("job_id")
     artifacts_parser.add_argument("--data-dir", help="persistent data directory")
+
+    compact_parser = commands.add_parser(
+        "job-compact", help="remove editable FLAC masters after verified export"
+    )
+    compact_parser.add_argument("job_id")
+    compact_parser.add_argument("--data-dir", help="persistent data directory")
 
     web_parser = commands.add_parser("web", help="run the local Narranova web interface")
     web_parser.add_argument("--host", default="127.0.0.1")
@@ -246,6 +253,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{artifact.id}  {artifact.kind}  "
                     f"{artifact.byte_size} bytes  {artifact.relative_path}"
                 )
+            return 0
+        if args.command == "job-compact":
+            freed = DeleteArtifacts(repository, generation_repository, layout).compact_job(
+                args.job_id
+            )
+            print(f"Finalized {args.job_id} and freed {freed} bytes")
             return 0
         raise AssertionError(f"Unhandled command: {args.command}")
     except (EpubError, FileNotFoundError, KeyError, RuntimeError, ValueError) as exc:

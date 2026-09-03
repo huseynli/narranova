@@ -20,21 +20,25 @@ from narranova.application.default_voices import (
     default_voice_pair,
     default_voice_pairs,
 )
-from narranova.application.assembly import AudioAssembler
+from narranova.application.assembly import AudioAssembler, M4BEncoder
 from narranova.application.deletion import DeleteArtifacts
-from narranova.application.generation import GenerationJobs, VoiceProfiles
+from narranova.application.generation import AudioMasters, GenerationJobs, VoiceProfiles
 from narranova.application.ingest import ImportBook
 from narranova.application.provider_catalog import PROVIDER_TYPES, provider_type
 from narranova.application.revise_plan import ReviseNarrationPlan
 from narranova.application.voice_studio import INSTRUCTION_PRESETS, VoiceStudio
 from narranova.artifacts import ArtifactLayout, ArtifactStore
-from narranova.audio import validate_wave
+from narranova.audio import FFmpegAudioMasters, validate_wave
 from narranova.config import Settings
 from narranova.domain.narration import NarrationPlan
 from narranova.epub import EpubParser
 from narranova.persistence import Database
 from narranova.persistence.books import BookRepository
-from narranova.persistence.generation import GenerationRepository, StoredArtifact
+from narranova.persistence.generation import (
+    GenerationRepository,
+    StoredArtifact,
+    StoredChunk,
+)
 
 
 MAX_REQUEST_BYTES = 128 * 1024 * 1024
@@ -332,6 +336,22 @@ class NarranovaWebApp:
                     ),
                     set_cookie,
                 )
+            if method == "GET" and len(parts) == 3 and parts[0] == "jobs" and parts[2] == "compact":
+                job = self.generation.get_job(parts[1])
+                return self._html(
+                    start_response,
+                    self._confirm(
+                        environ,
+                        csrf,
+                        title="Finalize audiobook storage",
+                        subject=f"{job['book_title']} · {parts[1][:12]}",
+                        warning="This permanently removes the lossless FLAC chunk masters. The verified M4B, narration map, source EPUB, text, and voice snapshot remain. Restoring editable sources requires synthesizing the book again.",
+                        action=f"/jobs/{self._e(parts[1])}/compact",
+                        cancel=f"/jobs/{self._e(parts[1])}",
+                        button="Finalize and free space",
+                    ),
+                    set_cookie,
+                )
             if method == "GET" and len(parts) == 5 and parts[0] == "jobs" and parts[2] == "chunks" and parts[4] == "delete":
                 chunk = self.generation.get_chunk(parts[1], parts[3])
                 return self._html(
@@ -341,7 +361,7 @@ class NarranovaWebApp:
                         csrf,
                         title="Delete generated chunk",
                         subject=chunk.id,
-                        warning="This deletes the generated WAV and returns the chunk to pending. You can regenerate it by running the job again.",
+                        warning="This deletes the lossless FLAC master and returns the chunk to pending. You can regenerate it by running the job again.",
                         action=f"/jobs/{self._e(parts[1])}/chunks/{self._e(parts[3])}/delete",
                         cancel=f"/jobs/{self._e(parts[1])}",
                         button="Delete generated audio",
@@ -493,6 +513,15 @@ class NarranovaWebApp:
             started = self.supervisor.assemble(parts[1])
             notice = "Audiobook+build+started" if started else "Job+is+already+busy"
             return self._redirect(start_response, f"/jobs/{parts[1]}?notice={notice}")
+        if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "compact":
+            if self.supervisor.is_active(parts[1]):
+                raise ValueError("Wait for active generation or assembly before finalizing")
+            freed = self.deletion.compact_job(parts[1])
+            notice = self._format_bytes(freed).replace(" ", "+")
+            return self._redirect(
+                start_response,
+                f"/jobs/{parts[1]}?notice=Finalized+and+freed+{notice}",
+            )
         if (
             len(parts) == 5
             and parts[0] == "jobs"
@@ -790,15 +819,28 @@ class NarranovaWebApp:
         regenerating = self.supervisor.is_regenerating(job_id)
         assembling = status == "assembling" or self.supervisor.is_assembling(job_id)
         all_completed = bool(chunks) and completed == len(chunks)
+        compacted = bool(job.get("compacted_at"))
+        masters_available = bool(chunks) and all(
+            chunk.audio_artifact_path and chunk.audio_sha256 for chunk in chunks
+        )
+        editable_bytes = self._chunk_master_bytes(chunks)
         artifacts = self._visible_outputs(job_id)
         has_audiobook = any(artifact.kind == "audiobook" for artifact in artifacts)
         regeneration_disabled = status in {"generating", "pause_requested", "assembling"}
         chunk_rows = "".join(
-            f"""<article class="chunk-row" data-chunk-id="{self._e(chunk.database_id)}"><div><span class="mono">{self._e(chunk.id)}</span><strong data-chunk-status>{self._e(chunk.status)}</strong><small data-chunk-meta>{chunk.attempts} attempt{'s' if chunk.attempts != 1 else ''}{f' · {chunk.duration_seconds:.1f}s' if chunk.duration_seconds else ''}</small></div><div class="chunk-actions" data-chunk-actions>{self._chunk_actions(job_id, chunk.database_id, csrf, regeneration_disabled) if chunk.status == 'completed' else ''}</div></article>"""
+            f"""<article class="chunk-row" data-chunk-id="{self._e(chunk.database_id)}"><div><span class="mono">{self._e(chunk.id)}</span><strong data-chunk-status>{self._e(chunk.status)}</strong><small data-chunk-meta>{chunk.attempts} attempt{'s' if chunk.attempts != 1 else ''}{f' · {chunk.duration_seconds:.1f}s' if chunk.duration_seconds else ''}{' · lossless FLAC' if chunk.audio_artifact_path else ''}</small></div><div class="chunk-actions" data-chunk-actions>{self._chunk_actions(job_id, chunk.database_id, csrf, regeneration_disabled) if chunk.status == 'completed' and chunk.audio_artifact_path else '<span class="source-removed">Master removed after finalization</span>' if compacted else ''}</div></article>"""
             for chunk in chunks
         )
-        startable = status in {"ready", "failed", "paused"} and not all_completed
-        start_label = "Resume generation" if status in {"failed", "paused"} else "Start generation"
+        startable = (
+            status in {"ready", "failed", "paused"} and not all_completed
+        ) or (compacted and status == "completed")
+        start_label = (
+            "Restore editable sources"
+            if compacted
+            else "Resume generation"
+            if status in {"failed", "paused"}
+            else "Start generation"
+        )
         running_label = (
             "Building audiobook"
             if assembling
@@ -810,16 +852,52 @@ class NarranovaWebApp:
         error_message = str(job.get("error_message") or "")
         error = f'<div class="alert" data-job-error{"" if error_message else " hidden"}>{self._e(error_message)}</div>'
         output_rows = self._output_rows(job_id, artifacts)
-        assemble_allowed = all_completed and status in {"completed", "failed"}
+        assemble_allowed = (
+            all_completed
+            and masters_available
+            and status in {"completed", "failed"}
+        )
         assemble_label = "Rebuild audiobook" if has_audiobook else "Build audiobook"
         empty_output = (
             "No deliverables yet. Build the audiobook to create them."
             if all_completed
             else "Complete every chunk, then build the audiobook."
         )
-        output_panel = f"""<section class="panel outputs"><header><div><p class="eyebrow">Deliverables</p><h2>Audiobook files</h2></div><span class="count" data-output-count>{len(artifacts):02d}</span></header><div data-output-artifacts>{output_rows or f'<div class="empty">{empty_output}</div>'}</div><div class="output-build"><form method="post" action="/jobs/{self._e(job_id)}/assemble" data-job-assemble{' hidden' if not assemble_allowed else ''}>{self._csrf(csrf)}<button class="primary" data-job-assemble-label>{assemble_label}</button></form><p>Builds chapter WAVs, a source-mapped narration file, and a chapterized M4B.</p></div></section>"""
+        storage = self._storage_controls(
+            job_id, has_audiobook, compacted, editable_bytes
+        )
+        output_panel = f"""<section class="panel outputs"><header><div><p class="eyebrow">Deliverables</p><h2>Audiobook files</h2></div><span class="count" data-output-count>{len(artifacts):02d}</span></header><div data-output-artifacts>{output_rows or f'<div class="empty">{empty_output}</div>'}</div><div class="output-build"><form method="post" action="/jobs/{self._e(job_id)}/assemble" data-job-assemble{' hidden' if not assemble_allowed else ''}>{self._csrf(csrf)}<button class="primary" data-job-assemble-label>{assemble_label}</button></form><p>Encodes the lossless FLAC masters once into a source-mapped, chapterized M4B.</p></div><div class="storage-policy" data-storage-policy>{storage}</div></section>"""
         body = f"""<a class="back" href="/books/{self._e(job['book_id'])}">← Back to book</a><section class="job-head full-page-heading"><div><p class="eyebrow">Generation job</p><h1>{self._e(job_id[:12])}</h1><p data-job-summary>{completed} of {len(chunks)} chunks complete</p></div><span class="status status-{self._e(status)}" data-job-status>{self._e(status)}</span></section>{error}<section class="panel progress-panel" data-job-monitor data-job-id="{self._e(job_id)}" data-csrf="{self._e(csrf)}"><div class="progress-copy"><strong data-job-percent>{percent}%</strong><span>verified audio</span></div><div class="progress"><i data-job-progress-bar style="width:{percent}%"></i></div><div class="job-actions">{controls}</div></section>{output_panel}<section class="panel chunks"><header><div><p class="eyebrow">Artifacts</p><h2>Audio chunks</h2></div><span class="count">{len(chunks):02d}</span></header>{chunk_rows}</section>"""
         return self._layout("Generation", body, environ)
+
+    def _storage_controls(
+        self,
+        job_id: str,
+        has_audiobook: bool,
+        compacted: bool,
+        editable_bytes: int,
+    ) -> str:
+        if compacted:
+            return """<div><span class="status status-completed">Compact</span><strong>Finished files only</strong><p>Lossless chunk masters were removed. The M4B and narration map remain.</p></div>"""
+        action = (
+            f'<a class="button" href="/jobs/{self._e(job_id)}/compact">Finalize and free space</a>'
+            if has_audiobook and editable_bytes
+            else ""
+        )
+        return f"""<div><span class="status">Editable</span><strong>{self._format_bytes(editable_bytes)} of lossless chunk masters</strong><p>Keep these FLAC files for individual regeneration, or remove them after approving the M4B.</p></div>{action}"""
+
+    def _chunk_master_bytes(self, chunks: list[StoredChunk]) -> int:
+        total = 0
+        for chunk in chunks:
+            if not chunk.audio_artifact_path:
+                continue
+            try:
+                path = self._artifact(str(chunk.audio_artifact_path))
+                if path.is_file():
+                    total += path.stat().st_size
+            except (OSError, RuntimeError):
+                continue
+        return total
 
     def _visible_outputs(self, job_id: str) -> list[StoredArtifact]:
         return [
@@ -864,6 +942,10 @@ class NarranovaWebApp:
         completed = sum(chunk.status == "completed" for chunk in chunks)
         percent = round((completed / len(chunks)) * 100) if chunks else 0
         artifacts = self._visible_outputs(job_id)
+        compacted = bool(job.get("compacted_at"))
+        masters_available = bool(chunks) and all(
+            chunk.audio_artifact_path and chunk.audio_sha256 for chunk in chunks
+        )
         content = json.dumps(
             {
                 "status": job["status"],
@@ -875,7 +957,10 @@ class NarranovaWebApp:
                 "percent": percent,
                 "can_assemble": bool(chunks)
                 and completed == len(chunks)
+                and masters_available
                 and job["status"] in {"completed", "failed"},
+                "compacted": compacted,
+                "editable_bytes": self._chunk_master_bytes(chunks),
                 "has_audiobook": any(
                     artifact.kind == "audiobook" for artifact in artifacts
                 ),
@@ -895,6 +980,7 @@ class NarranovaWebApp:
                         "status": chunk.status,
                         "attempts": chunk.attempts,
                         "duration": chunk.duration_seconds,
+                        "audio_available": bool(chunk.audio_artifact_path),
                     }
                     for chunk in chunks
                 ],
@@ -934,10 +1020,7 @@ class NarranovaWebApp:
         chunk = self.generation.get_chunk(job_id, chunk_id)
         if chunk.status != "completed" or not chunk.audio_artifact_path:
             raise KeyError("Audio is not available")
-        path = self._artifact(chunk.audio_artifact_path)
-        validate_wave(path)
-        if self.store.sha256(path) != chunk.audio_sha256:
-            raise RuntimeError("Audio failed hash validation")
+        path = self.jobs.verified_chunk_path(job_id, chunk_id)
         headers: list[tuple[str, str]] = [("Accept-Ranges", "bytes")]
         if download:
             safe_name = "".join(
@@ -947,7 +1030,7 @@ class NarranovaWebApp:
                 and (character.isalnum() or character in {"-", "_"})
             ) or "chunk"
             headers.append(
-                ("Content-Disposition", f'attachment; filename="{safe_name}.wav"')
+                ("Content-Disposition", f'attachment; filename="{safe_name}.flac"')
             )
         size = path.stat().st_size
         byte_range = self._audio_range(range_header, size) if not download else None
@@ -956,7 +1039,7 @@ class NarranovaWebApp:
                 start_response,
                 "416 Range Not Satisfiable",
                 b"",
-                "audio/wav",
+                "audio/flac",
                 headers=headers + [("Content-Range", f"bytes */{size}")],
             )
         if byte_range is not None:
@@ -968,14 +1051,14 @@ class NarranovaWebApp:
                 start_response,
                 "206 Partial Content",
                 content,
-                "audio/wav",
+                "audio/flac",
                 headers=headers + [("Content-Range", f"bytes {start}-{end}/{size}")],
             )
         return self._respond(
             start_response,
             "200 OK",
             path.read_bytes(),
-            "audio/wav",
+            "audio/flac",
             headers=headers,
         )
 
@@ -1224,7 +1307,12 @@ class NarranovaWebApp:
         return [content]
 
 
-def create_web_app(data_dir: str | Path | None = None) -> NarranovaWebApp:
+def create_web_app(
+    data_dir: str | Path | None = None,
+    *,
+    masters: AudioMasters | None = None,
+    encoder: M4BEncoder | None = None,
+) -> NarranovaWebApp:
     settings = Settings.load(data_dir)
     layout = ArtifactLayout.at(settings.data_dir)
     layout.initialize()
@@ -1234,9 +1322,12 @@ def create_web_app(data_dir: str | Path | None = None) -> NarranovaWebApp:
     generation = GenerationRepository(database)
     generation.recover_interrupted_assemblies()
     store = ArtifactStore(settings.data_dir)
+    audio_masters = masters or FFmpegAudioMasters()
     profiles = VoiceProfiles(generation, layout, store)
-    jobs = GenerationJobs(books, generation, layout, store)
-    assembler = AudioAssembler(generation, layout, store)
+    jobs = GenerationJobs(books, generation, layout, store, masters=audio_masters)
+    assembler = AudioAssembler(
+        generation, layout, store, encoder=encoder, masters=audio_masters
+    )
     return NarranovaWebApp(
         settings,
         books,

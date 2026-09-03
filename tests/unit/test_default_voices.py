@@ -13,7 +13,7 @@ from narranova.persistence import Database
 from narranova.persistence.books import BookRepository
 from narranova.persistence.generation import GenerationRepository
 from tests.unit.test_epub_ingest import make_epub
-from tests.unit.test_generation_jobs import FakeProvider
+from tests.unit.test_generation_jobs import FakeAudioMasters, FakeProvider
 
 
 class DefaultVoiceTests(unittest.TestCase):
@@ -46,7 +46,12 @@ class DefaultVoiceTests(unittest.TestCase):
             )
             fake = FakeProvider()
             jobs = GenerationJobs(
-                books, generation, layout, store, provider_factory=lambda job: fake
+                books,
+                generation,
+                layout,
+                store,
+                provider_factory=lambda job: fake,
+                masters=FakeAudioMasters(),
             )
 
             job_id = jobs.create(imported.book_id, "builtin:01", provider_id)

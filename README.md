@@ -2,7 +2,7 @@
 
 Narranova is a self-hostable EPUB-to-audiobook application. It creates a
 reviewable narration plan, generates audio through external TTS providers, and
-produces chapter audio and a chapterized M4B.
+produces a chapterized M4B without retaining duplicate chapter PCM files.
 
 The production implementation lives under `src/narranova`. MOSS/OpenMOSS is an
 external service; its runtime, models, and Windows dependencies are not part of
@@ -40,8 +40,8 @@ PYTHONPATH=src python -m unittest discover -s tests/unit -v
 - Stable, source-mapped narration plans
 - Provider-sized chunk planning with content-loss verification
 - Dedicated external OpenMOSS streaming-PCM adapter
-- WAV validation before atomic artifact promotion
-- Lossless chapter-WAV assembly with selective rebuilds
+- Temporary provider-WAV validation and 48 kHz mono FLAC normalization
+- Direct FLAC-to-M4B assembly without persistent chapter WAVs
 - Source-mapped narration-map export
 - FFmpeg-backed chapterized M4B export with metadata and cover art
 
@@ -73,8 +73,8 @@ PYTHONPATH=src python -m narranova job-run JOB_ID --data-dir ./data
 PYTHONPATH=src python -m narranova job-status JOB_ID --data-dir ./data
 ```
 
-Running `job-run` again resumes pending or failed work and skips completed WAVs
-whose hashes and audio frames still validate. From another shell,
+Running `job-run` again resumes pending or failed work and skips completed FLAC
+masters whose hashes and audio streams still validate. From another shell,
 `job-pause JOB_ID` requests a pause after the current provider request finishes;
 running `job-run JOB_ID` resumes it.
 
@@ -85,9 +85,20 @@ PYTHONPATH=src python -m narranova job-assemble JOB_ID --data-dir ./data
 PYTHONPATH=src python -m narranova job-artifacts JOB_ID --data-dir ./data
 ```
 
-M4B export requires `ffmpeg` and `ffprobe` on the Narranova host. Chapter WAVs
-and the narration map are retained if M4B encoding fails, so the build can be
-retried after the tools are installed.
+M4B export and FLAC normalization require `ffmpeg` and `ffprobe` on the
+Narranova host. Verified FLAC masters and the narration map are retained if M4B
+encoding fails, so the build can be retried after the tools are installed.
+
+Jobs retain their lossless FLAC masters by default for individual chunk
+regeneration. After approving the M4B, remove those editable sources while
+keeping the final files and job history:
+
+```console
+PYTHONPATH=src python -m narranova job-compact JOB_ID --data-dir ./data
+```
+
+Running `job-run` on a compacted job regenerates its editable masters and
+invalidates the old derived M4B so it can be rebuilt.
 
 ## Web interface
 
@@ -112,8 +123,9 @@ and copied reference WAV. Profiles used by unfinished jobs are visibly marked an
 protected from deletion until those jobs complete or are deleted; deleting the
 profile afterward removes its own files without breaking completed jobs. Saving a
 profile removes its discarded draft audio. The interface also supports durable job creation,
-background generation, pause/resume, status, verified chunk playback, selective
-chunk regeneration, chapter assembly, and final artifact downloads.
+background generation, pause/resume, status, verified FLAC chunk playback,
+selective chunk regeneration, direct M4B assembly, storage finalization, and
+final artifact downloads.
 Saving section choices creates an immutable plan revision; existing jobs retain
 their original plan and new jobs use the latest revision. The server binds to
 loopback by default; use `--host` deliberately when exposing it to a trusted

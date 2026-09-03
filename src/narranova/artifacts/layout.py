@@ -82,20 +82,19 @@ class ArtifactLayout:
 
     def job_chunk_master(self, book_id: str, job_id: str, chunk_id: str) -> Path:
         safe_chunk_id = _validate_id(chunk_id, "chunk id")
-        return self.job_root(book_id, job_id) / "chunks" / f"{safe_chunk_id}.wav"
+        return self.job_root(book_id, job_id) / "chunks" / f"{safe_chunk_id}.flac"
+
+    def job_chunk_temporary(self, job_id: str, chunk_id: str, token: str) -> Path:
+        safe_job_id = _validate_id(job_id, "job id")
+        safe_chunk_id = _validate_id(chunk_id, "chunk id")
+        safe_token = _validate_id(token, "temporary token")
+        return (
+            self.temporary_root
+            / f"generation-{safe_job_id}-{safe_chunk_id}-{safe_token}.wav"
+        )
 
     def job_voice_reference(self, book_id: str, job_id: str) -> Path:
         return self.job_root(book_id, job_id) / "voice" / "reference.wav"
-
-    def job_chapter_audio(self, book_id: str, job_id: str, chapter_index: int) -> Path:
-        if chapter_index < 0:
-            raise ValueError("Chapter index cannot be negative")
-        return (
-            self.job_root(book_id, job_id)
-            / "output"
-            / "chapters"
-            / f"{chapter_index:04d}.wav"
-        )
 
     def job_audiobook(self, book_id: str, job_id: str) -> Path:
         return self.job_root(book_id, job_id) / "output" / "audiobook.m4b"

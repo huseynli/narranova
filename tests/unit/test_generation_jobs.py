@@ -10,6 +10,7 @@ from narranova.application.generation import GenerationJobs, VoiceProfiles
 from narranova.application.ingest import ImportBook
 from narranova.application.revise_plan import ReviseNarrationPlan
 from narranova.artifacts import ArtifactLayout, ArtifactStore
+from narranova.audio import AudioMasterInfo, validate_wave
 from narranova.epub import EpubParser
 from narranova.persistence import Database
 from narranova.persistence.books import BookRepository
@@ -41,6 +42,32 @@ class FakeProvider:
         return SynthesisResult(request.destination, digest, 0.01)
 
 
+class FakeAudioMasters:
+    def normalize(self, source: Path, destination: Path) -> AudioMasterInfo:
+        source_info = validate_wave(source)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+        return AudioMasterInfo(
+            destination,
+            "flac",
+            1,
+            48_000,
+            source_info.duration_seconds,
+            destination.stat().st_size,
+        )
+
+    def validate(self, path: Path) -> AudioMasterInfo:
+        info = validate_wave(path)
+        return AudioMasterInfo(
+            path,
+            "flac",
+            1,
+            48_000,
+            info.duration_seconds,
+            path.stat().st_size,
+        )
+
+
 class GenerationJobTests(unittest.TestCase):
     def test_job_generates_resumes_and_repairs_corrupt_completed_audio(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -70,7 +97,12 @@ class GenerationJobTests(unittest.TestCase):
             )
             fake = FakeProvider()
             jobs = GenerationJobs(
-                books, generation, layout, store, provider_factory=lambda job: fake
+                books,
+                generation,
+                layout,
+                store,
+                provider_factory=lambda job: fake,
+                masters=FakeAudioMasters(),
             )
 
             job_id = jobs.create(imported.book_id, profile_id)
@@ -193,7 +225,12 @@ class GenerationJobTests(unittest.TestCase):
             )
             fake = FakeProvider()
             jobs = GenerationJobs(
-                books, generation, layout, store, provider_factory=lambda job: fake
+                books,
+                generation,
+                layout,
+                store,
+                provider_factory=lambda job: fake,
+                masters=FakeAudioMasters(),
             )
             job_id = jobs.create(imported.book_id, profile_id)
             jobs.run(job_id)
@@ -263,7 +300,9 @@ class GenerationJobTests(unittest.TestCase):
                 instruction="A fresh narrator.",
                 name="Fresh narrator",
             )
-            jobs = GenerationJobs(books, generation, layout, store)
+            jobs = GenerationJobs(
+                books, generation, layout, store, masters=FakeAudioMasters()
+            )
             job_id = jobs.create(imported.book_id, profile_id)
             chunk = generation.list_chunks(job_id)[0]
             copied_audio = layout.job_chunk_master(imported.book_id, job_id, chunk.id)
@@ -277,7 +316,9 @@ class GenerationJobTests(unittest.TestCase):
             )
             generation.complete_job(job_id)
 
-            GenerationJobs(books, generation, layout, store)
+            GenerationJobs(
+                books, generation, layout, store, masters=FakeAudioMasters()
+            )
 
             repaired = generation.list_chunks(job_id)[0]
             self.assertEqual(generation.get_job(job_id)["status"], "ready")

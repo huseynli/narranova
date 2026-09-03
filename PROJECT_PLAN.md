@@ -10,8 +10,8 @@ Canonical repository: this repository
 
 Build Narranova, a lightweight, self-hostable application and CLI that accepts
 an EPUB, creates a reviewable narration plan, generates a resumable audiobook
-through a selected TTS provider, and produces chapter audio plus a
-metadata-rich, chapterized M4B.
+through a selected TTS provider, and produces a metadata-rich, chapterized M4B
+without retaining duplicate chapter PCM files.
 
 The first release supports:
 
@@ -126,7 +126,7 @@ Major components:
 - `JobEngine`: persistent pause/resume/retry/cancel state machine.
 - `ArtifactStore`: paths, hashes, atomic writes, validation, retention, and
   download artifacts.
-- `AudioAssembler`: chunk validation, chapter assembly, loudness/format policy,
+- `AudioAssembler`: FLAC-master validation, ordered direct assembly,
   AAC encoding, chapter markers, metadata, and M4B packaging.
 - `WebApp`: upload, plan review, provider selection, voice studio, progress,
   error recovery, and downloads.
@@ -421,9 +421,9 @@ Rules:
   concurrent requests so one paused player cannot block another.
 - Failed chunks retain error history and may be retried independently.
 - A completed chunk can be explicitly regenerated without affecting unrelated
-  chunks. Its verified WAV remains in place until a replacement succeeds, and
+  chunks. Its verified FLAC master remains in place until a replacement succeeds, and
   this single-chunk operation does not expose the full-job pause control.
-- If a chunk changes, its chapter and final M4B become stale and must be rebuilt.
+- If a chunk changes, the narration map and final M4B become stale and must be rebuilt.
 - Default generation concurrency is one.
 - Retry policy, backoff, provider request IDs, timings, audio duration, RTF,
   character count, and errors are logged.
@@ -431,18 +431,21 @@ Rules:
 ## Audio and output policy
 
 Generated audio is first normalized into a validated internal master format.
-Provider responses never become final artifacts without verification.
+OpenMOSS PCM is written to a temporary WAV, validated, converted to 48 kHz mono
+lossless FLAC, verified, and then atomically promoted. The temporary provider
+WAV is deleted immediately. Provider responses never become durable artifacts
+without verification.
 
 After all job chunks complete, the user explicitly starts an assembly run.
-Narranova concatenates compatible WAV masters without re-encoding, records
-chapter and book offsets in the narration map, then invokes external FFmpeg and
-FFprobe to create and validate the chapterized AAC M4B. A failed M4B encode
-retains verified chapter WAVs and the narration map for a safe retry.
+Narranova passes the ordered FLAC masters directly to external FFmpeg, records
+chapter and book offsets in the narration map, and performs one AAC encoding
+pass to create the chapterized M4B. FFprobe then validates the result. Assembly
+does not create persistent chapter WAVs. A failed M4B encode retains the
+verified FLAC masters and narration map for a safe retry.
 
 The application produces:
 
 - Independently replaceable chunk masters.
-- One audio artifact per chapter.
 - A metadata-rich, chapterized M4B.
 - A machine-readable narration map for future alignment.
 
@@ -489,9 +492,7 @@ books/
           reference.wav
         chunks/
           c001-p001.txt
-          c001-p001.wav
-    chapters/
-      001 - Chapter One.m4a
+          c001-p001.flac
     output/
       Book Title.m4b
       cover.jpg
@@ -507,7 +508,12 @@ generated chunks, voice profiles, or abandoned Voice Lab drafts removes their
 respective files as well as their database records.
 
 Intermediate-master retention is configurable after final artifacts have been
-verified. Default behavior should favor resumability over saving disk space.
+verified. Jobs are editable by default and retain lossless FLAC chunks for
+selective regeneration. After approving a verified M4B, the user may finalize
+the job to delete those FLAC masters while retaining the M4B, narration map,
+source EPUB, chunk text, voice snapshot, and job history. Restoring editable
+sources requires synthesizing the missing chunks again. Abandoned temporary
+provider WAVs are removed before an interrupted job resumes.
 
 ## Web application and CLI
 
@@ -526,8 +532,9 @@ Web flow:
    compatible saved voice profile.
 7. Start generation.
 8. Monitor, pause, resume, retry, or regenerate individual chunks.
-9. Review chapter artifacts and errors.
-10. Download chapter audio, M4B, narration map, and project metadata.
+9. Review chunk artifacts, storage use, and errors.
+10. Download the M4B, narration map, and project metadata, then optionally
+    finalize the job to remove editable FLAC masters.
 
 The first UI should use server-rendered pages and limited JavaScript rather than
 a large client framework unless later requirements justify one.
@@ -603,8 +610,7 @@ In scope:
 - MOSS description and five-take reference-selection workflow
 - Kokoro voice-selection and preview workflow
 - Persistent pause/resume/retry/cancel
-- Chunk and chapter validation
-- Chapter audio
+- Provider-WAV and lossless FLAC-master validation
 - Chapterized M4B
 - Narration map and project metadata
 - CLI
@@ -636,9 +642,9 @@ Reimplement and test the useful parts behind Narranova's production boundaries:
 - Paragraph/sentence chunking and loss checks
 - Manifest/state concepts
 - Atomic temporary output
-- WAV validation
+- Provider-WAV validation and mono FLAC normalization
 - Retry/error recording
-- Chapter concatenation
+- Ordered direct FLAC-to-M4B assembly
 - Existing focused tests
 
 The EPUB extractor requires the largest redesign because the initial version
@@ -670,7 +676,8 @@ V1 is complete when all of the following are true:
    verified completed chunks.
 8. The user can pause, resume, retry, and regenerate a selected chunk.
 9. Failed or zero-length audio never becomes a completed artifact.
-10. Chapter files are assembled in source order and can be rebuilt independently.
+10. FLAC masters are assembled in source order without persistent chapter WAVs,
+    and a changed chunk invalidates only derived outputs.
 11. The final M4B contains the EPUB cover and metadata plus working chapter
     markers with verified timestamps.
 12. The output includes a narration map connecting audio chunks to EPUB source

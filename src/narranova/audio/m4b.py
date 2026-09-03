@@ -14,7 +14,7 @@ from typing import Any, Callable
 @dataclass(frozen=True)
 class M4BChapter:
     title: str
-    path: Path
+    paths: tuple[Path, ...]
     start_seconds: float
     end_seconds: float
 
@@ -55,22 +55,25 @@ class FFmpegM4BEncoder:
         ffmetadata = workspace / "chapters.ffmetadata"
         ffmetadata.write_text(self._metadata(chapters, metadata), encoding="utf-8")
         temporary = destination.with_name(f".{destination.name}.part.m4b")
+        sources = [path for chapter in chapters for path in chapter.paths]
+        if not sources:
+            raise ValueError("An M4B requires at least one audio master")
         command = [self.ffmpeg, "-nostdin", "-y"]
-        for chapter in chapters:
-            command.extend(("-i", str(chapter.path)))
-        metadata_input = len(chapters)
+        for source in sources:
+            command.extend(("-i", str(source)))
+        metadata_input = len(sources)
         command.extend(("-f", "ffmetadata", "-i", str(ffmetadata)))
         cover_input = metadata_input + 1
         if cover is not None:
             command.extend(("-i", str(cover)))
-        if len(chapters) == 1:
+        if len(sources) == 1:
             command.extend(("-map", "0:a:0"))
         else:
-            inputs = "".join(f"[{index}:a:0]" for index in range(len(chapters)))
+            inputs = "".join(f"[{index}:a:0]" for index in range(len(sources)))
             command.extend(
                 (
                     "-filter_complex",
-                    f"{inputs}concat=n={len(chapters)}:v=0:a=1[audiobook]",
+                    f"{inputs}concat=n={len(sources)}:v=0:a=1[audiobook]",
                     "-map",
                     "[audiobook]",
                 )
@@ -96,6 +99,10 @@ class FFmpegM4BEncoder:
                 str(metadata_input),
                 "-c:a",
                 "aac",
+                "-ac",
+                "1",
+                "-ar",
+                "48000",
                 "-b:a",
                 "96k",
                 "-movflags",
