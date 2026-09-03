@@ -7,14 +7,20 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from narranova.application.generation import VoiceProfiles
 from narranova.application.provider_catalog import provider_type
 from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.audio import validate_wave
 from narranova.persistence.generation import GenerationRepository
-from narranova.providers import OpenMossConfig, OpenMossProvider, SynthesisRequest, TTSProvider
+from narranova.providers import (
+    OpenMossConfig,
+    OpenMossProvider,
+    SynthesisRequest,
+    TTSProvider,
+    normalize_openmoss_sampling,
+)
 
 
 INSTRUCTION_PRESETS: tuple[tuple[str, str], ...] = (
@@ -77,6 +83,7 @@ class VoiceStudio:
             "instruction": INSTRUCTION_PRESETS[0][1],
             "language": "English",
             "sample_text": DEFAULT_SAMPLE_TEXT,
+            "sampling": {},
             "uploaded_reference_path": None,
             "uploaded_reference_sha256": None,
             "takes": [],
@@ -107,6 +114,7 @@ class VoiceStudio:
         language: str,
         profile_name: str = "",
         uploaded_reference: Path | None = None,
+        sampling: Mapping[str, object] | None = None,
     ) -> str:
         draft = self.get(draft_id)
         instruction = instruction.strip()
@@ -121,6 +129,9 @@ class VoiceStudio:
         if not provider["enabled"]:
             raise ValueError("The selected TTS connection is disabled")
         definition = provider_type(str(provider["kind"]))
+        sampling_overrides = normalize_openmoss_sampling(sampling)
+        if sampling_overrides and not definition.supports_sampling:
+            raise ValueError("The selected TTS connection does not support sampling controls")
         if uploaded_reference is not None:
             validate_wave(uploaded_reference)
             upload_path = self.layout.voice_studio_upload(draft_id)
@@ -137,6 +148,7 @@ class VoiceStudio:
                 "instruction": instruction,
                 "sample_text": sample_text,
                 "language": language.strip() or "English",
+                "sampling": dict(sampling_overrides),
                 "updated_at": time.time(),
             }
         )
@@ -149,6 +161,8 @@ class VoiceStudio:
         take_id = uuid.uuid4().hex
         destination = self.layout.voice_studio_take(draft_id, take_id)
         try:
+            request_sampling = dict(sampling_overrides)
+            seed = request_sampling.pop("seed", None)
             result = self.provider_factory(provider).synthesize(
                 SynthesisRequest(
                     text=sample_text,
@@ -156,6 +170,8 @@ class VoiceStudio:
                     language=language.strip() or "English",
                     instruction=instruction,
                     reference_audio=reference,
+                    seed=int(seed) if seed is not None else None,
+                    parameters=request_sampling,
                 )
             )
             result_path = result.audio_path.resolve()
@@ -177,6 +193,7 @@ class VoiceStudio:
             "audio_path": result.audio_path.relative_to(self.layout.root).as_posix(),
             "audio_sha256": result.audio_sha256,
             "duration_seconds": result.duration_seconds,
+            "sampling": dict(sampling_overrides),
             "created_at": time.time(),
         }
         draft["takes"].append(take)
@@ -205,12 +222,14 @@ class VoiceStudio:
                 "Choose a reference created or uploaded in this Voice Lab draft"
             )
         reference = self._reference(draft, reference_choice, required=True)
+        sampling = self._sampling_for_reference(draft, reference_choice)
         profile_id = self.profiles.create_openmoss_profile(
             provider_id=provider_id,
             reference_audio=reference,
             instruction=instruction,
             name=name,
             language=language.strip() or "English",
+            sampling=sampling,
         )
         self.discard(draft_id)
         return profile_id
@@ -277,6 +296,18 @@ class VoiceStudio:
         path = self.layout.voice_studio_manifest(str(draft["id"]))
         self.store.write_text(path, json.dumps(draft, ensure_ascii=False, sort_keys=True))
 
+    @staticmethod
+    def _sampling_for_reference(
+        draft: dict[str, Any], reference_choice: str
+    ) -> dict[str, object]:
+        if reference_choice.startswith("take:"):
+            take_id = reference_choice.split(":", 1)[1]
+            take = next((item for item in draft["takes"] if item["id"] == take_id), None)
+            if take is None:
+                raise KeyError(f"Voice Studio take not found: {take_id}")
+            return dict(take.get("sampling") or {})
+        return dict(draft.get("sampling") or {})
+
     def _artifact(self, relative_path: str) -> Path:
         path = (self.layout.root / relative_path).resolve()
         if not path.is_relative_to(self.layout.root):
@@ -288,5 +319,7 @@ class VoiceStudio:
         if provider["kind"] != "openmoss":
             raise ValueError(f"Unsupported provider kind: {provider['kind']}")
         return OpenMossProvider(
-            OpenMossConfig(str(provider["endpoint_url"]), **provider["configuration"])
+            OpenMossConfig.from_connection(
+                str(provider["endpoint_url"]), provider["configuration"]
+            )
         )

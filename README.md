@@ -40,6 +40,7 @@ PYTHONPATH=src python -m unittest discover -s tests/unit -v
 - Stable, source-mapped narration plans
 - Provider-sized chunk planning with content-loss verification
 - Dedicated external OpenMOSS streaming-PCM adapter
+- Controlled OpenMOSS connection benchmarks with Auto-tune recommendations
 - Temporary provider-WAV validation and 48 kHz mono FLAC normalization
 - Direct FLAC-to-M4B assembly without persistent chapter WAVs
 - Source-mapped narration-map export
@@ -48,6 +49,9 @@ PYTHONPATH=src python -m unittest discover -s tests/unit -v
 The OpenMOSS adapter deliberately preserves `stream=true`, PCM output,
 `stream_chunk_frames=16`, and the 6,000-token default. Reference cloning never
 sends `ref_text`. Narranova does not contain or launch the MOSS runtime.
+Connections store performance settings only. VoiceLab stores optional explicit
+quality/sampling overrides with a narrator profile; blank controls use the
+OpenMOSS engine default and are omitted from requests.
 
 The disposable audiobook and OpenMOSS WebUI prototypes have been removed.
 Verified lessons were reimplemented behind Narranova's production boundaries;
@@ -118,7 +122,11 @@ creates reference candidates from narration
 direction alone or an optional uploaded/generated source, then pairs the chosen
 reference with final instructions as a named reusable profile. Existing profiles
 are not offered as the new profile's final pair. Connections and profiles can be
-edited, renamed, or deleted. Each generation job owns an immutable voice snapshot
+edited, renamed, or deleted. Each connection can be health-tested and benchmarked
+with fixed text, narrator, instruction, seed, and engine-default sampling. Auto-tune
+measures streaming decode batches 16 through 512, recommends the smallest result
+within 3% of peak throughput, and can apply it to future jobs. Each generation job
+owns immutable connection-performance and voice snapshots
 and copied reference WAV. Profiles used by unfinished jobs are visibly marked and
 protected from deletion until those jobs complete or are deleted; deleting the
 profile afterward removes its own files without breaking completed jobs. Saving a
@@ -126,6 +134,9 @@ profile removes its discarded draft audio. The interface also supports durable j
 background generation, pause/resume, status, verified FLAC chunk playback,
 selective chunk regeneration, direct M4B assembly, storage finalization, and
 final artifact downloads.
+VoiceLab's collapsed advanced section exposes optional OpenMOSS sampling controls
+and manual candidate seeds. Audiobook chunks use deterministic per-chunk seeds so
+retries and regeneration remain reproducible without making every chunk identical.
 Saving section choices creates an immutable plan revision; existing jobs retain
 their original plan and new jobs use the latest revision. The server binds to
 loopback by default; use `--host` deliberately when exposing it to a trusted

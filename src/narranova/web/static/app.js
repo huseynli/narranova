@@ -50,6 +50,7 @@ if (themeToggle) {
 }
 
 const jobMonitor = document.querySelector("[data-job-monitor]");
+const benchmarkMonitor = document.querySelector("[data-benchmark-monitor]");
 
 function setJobControl(name, visible) {
   const control = document.querySelector(`[data-job-${name}]`);
@@ -279,6 +280,40 @@ if (jobMonitor) {
   window.setTimeout(pollJob, 900);
 }
 
+if (benchmarkMonitor) {
+  const pollBenchmark = async () => {
+    try {
+      const response = await fetch(benchmarkMonitor.dataset.statusUrl, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) throw new Error("Benchmark status request failed");
+      const state = await response.json();
+      const progress = benchmarkMonitor.querySelector("[data-benchmark-progress]");
+      if (progress) {
+        const active = state.active_stream_chunk_frames
+          ? ` · testing ${state.active_stream_chunk_frames} frames`
+          : "";
+        progress.textContent = `${state.completed} of ${state.total} measurements complete${active}`;
+      }
+      if (state.status === "running") {
+        window.setTimeout(pollBenchmark, 1500);
+      } else {
+        const title = benchmarkMonitor.querySelector("strong");
+        if (title) title.textContent = state.status === "completed"
+          ? "Benchmark complete"
+          : "Benchmark stopped";
+        if (progress && state.error) progress.textContent = state.error;
+        const refresh = benchmarkMonitor.querySelector("[data-benchmark-refresh]");
+        if (refresh) refresh.hidden = false;
+      }
+    } catch (error) {
+      window.setTimeout(pollBenchmark, 3000);
+    }
+  };
+  window.setTimeout(pollBenchmark, 600);
+}
+
 document.querySelectorAll("[data-instruction]").forEach((button) => {
   button.addEventListener("click", () => {
     const field = document.querySelector("#instruction");
@@ -336,6 +371,7 @@ function updateStudioModules() {
   const option = studioProvider.selectedOptions[0];
   const instructions = option?.dataset.instructions !== "false";
   const reference = option?.dataset.reference !== "false";
+  const sampling = option?.dataset.sampling !== "false";
   document.querySelectorAll('[data-studio-module="instructions"]').forEach((module) => {
     module.hidden = !instructions;
     module.querySelectorAll("textarea, input, select").forEach((field) => {
@@ -346,6 +382,12 @@ function updateStudioModules() {
     module.hidden = !reference;
     module.querySelectorAll("textarea, input, select").forEach((field) => {
       field.disabled = !reference;
+    });
+  });
+  document.querySelectorAll('[data-studio-module="sampling"]').forEach((module) => {
+    module.hidden = !sampling;
+    module.querySelectorAll("textarea, input, select").forEach((field) => {
+      field.disabled = !sampling;
     });
   });
 }

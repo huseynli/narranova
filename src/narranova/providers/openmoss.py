@@ -12,7 +12,7 @@ import urllib.request
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, TypedDict, cast
 
 from narranova.audio import validate_wave
 from narranova.providers.base import (
@@ -22,15 +22,188 @@ from narranova.providers.base import (
 )
 
 
+OPENMOSS_DEFAULT_MAX_NEW_TOKENS = 6000
+OPENMOSS_STREAM_FRAME_OPTIONS = (16, 32, 64, 128, 256, 512)
+
+
+class OpenMossSampling(TypedDict, total=False):
+    """Explicit OpenMOSS sampling overrides; absent keys mean engine default."""
+
+    text_temperature: float
+    text_top_p: float
+    text_top_k: int
+    audio_temperature: float
+    audio_top_p: float
+    audio_top_k: int
+    audio_repetition_penalty: float
+    seed: int
+
+
+@dataclass(frozen=True)
+class OpenMossSamplingField:
+    name: str
+    label: str
+    help_text: str
+    minimum: float
+    maximum: float
+    integer: bool = False
+
+
+OPENMOSS_SAMPLING_FIELDS: tuple[OpenMossSamplingField, ...] = (
+    OpenMossSamplingField(
+        "text_temperature",
+        "Text temperature",
+        "Controls randomness in text/control-token sampling. Lower is more "
+        "predictable; higher adds variation.",
+        0.0,
+        5.0,
+    ),
+    OpenMossSamplingField(
+        "text_top_p",
+        "Text top-p",
+        "Restricts text-token sampling to the most probable probability mass. "
+        "Lower values are more conservative.",
+        0.01,
+        1.0,
+    ),
+    OpenMossSamplingField(
+        "text_top_k",
+        "Text top-k",
+        "Limits text sampling to the top K candidate tokens. Lower values reduce variation.",
+        1,
+        1000,
+        True,
+    ),
+    OpenMossSamplingField(
+        "audio_temperature",
+        "Audio temperature",
+        "Controls speech variation. Lower values are usually steadier; higher values "
+        "may add expression but can increase instability or artifacts.",
+        0.0,
+        5.0,
+    ),
+    OpenMossSamplingField(
+        "audio_top_p",
+        "Audio top-p",
+        "Restricts the audio-token probability pool. Lower values are generally "
+        "more conservative.",
+        0.01,
+        1.0,
+    ),
+    OpenMossSamplingField(
+        "audio_top_k",
+        "Audio top-k",
+        "Limits how many audio-token candidates can be selected. Lower values reduce variation.",
+        1,
+        1000,
+        True,
+    ),
+    OpenMossSamplingField(
+        "audio_repetition_penalty",
+        "Audio repetition penalty",
+        "Discourages repeated audio-token patterns. Excessive values can sound unnatural.",
+        0.1,
+        5.0,
+    ),
+    OpenMossSamplingField(
+        "seed",
+        "Seed",
+        "Reproduces a candidate when text, reference, instruction, and sampling match. "
+        "Different seeds may change pacing, emphasis, prosody, or an instruction-only voice.",
+        0,
+        2_147_483_647,
+        True,
+    ),
+)
+
+
+def normalize_openmoss_sampling(values: Mapping[str, object] | None) -> OpenMossSampling:
+    """Validate explicit sampling overrides without inventing engine defaults."""
+
+    if not values:
+        return {}
+    specifications = {field.name: field for field in OPENMOSS_SAMPLING_FIELDS}
+    unknown = set(values).difference(specifications)
+    if unknown:
+        raise ValueError(f"Unsupported OpenMOSS sampling setting(s): {', '.join(sorted(unknown))}")
+    normalized: dict[str, int | float] = {}
+    for name, raw_value in values.items():
+        field = specifications[name]
+        if isinstance(raw_value, bool):
+            raise ValueError(f"{field.label} must be a number")
+        try:
+            number = float(cast(int | float | str, raw_value))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field.label} must be a number") from exc
+        if not field.minimum <= number <= field.maximum:
+            raise ValueError(
+                f"{field.label} must be between {field.minimum:g} and {field.maximum:g}"
+            )
+        if field.integer:
+            if not number.is_integer():
+                raise ValueError(f"{field.label} must be a whole number")
+            normalized[name] = int(number)
+        else:
+            normalized[name] = number
+    return cast(OpenMossSampling, normalized)
+
+
+def openmoss_sampling_from_form(fields: Mapping[str, str]) -> OpenMossSampling:
+    """Parse non-blank VoiceLab fields; blank inputs deliberately remain absent."""
+
+    explicit = {
+        field.name: fields[field.name].strip()
+        for field in OPENMOSS_SAMPLING_FIELDS
+        if fields.get(field.name, "").strip()
+    }
+    return normalize_openmoss_sampling(explicit)
+
+
+def openmoss_performance_settings(values: Mapping[str, object] | None) -> dict[str, int]:
+    """Read only request-level performance settings from connection configuration."""
+
+    configuration = values or {}
+    frames_raw = configuration.get("stream_chunk_frames", 16)
+    tokens_raw = configuration.get("max_new_tokens", OPENMOSS_DEFAULT_MAX_NEW_TOKENS)
+    if isinstance(frames_raw, bool) or isinstance(tokens_raw, bool):
+        raise ValueError("OpenMOSS performance settings must be whole numbers")
+    try:
+        frames_number = float(cast(int | float | str, frames_raw))
+        tokens_number = float(cast(int | float | str, tokens_raw))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("OpenMOSS performance settings must be whole numbers") from exc
+    if not frames_number.is_integer() or not tokens_number.is_integer():
+        raise ValueError("OpenMOSS performance settings must be whole numbers")
+    frames = int(frames_number)
+    tokens = int(tokens_number)
+    if frames <= 0 or tokens <= 0:
+        raise ValueError("OpenMOSS performance settings must be positive")
+    return {"stream_chunk_frames": frames, "max_new_tokens": tokens}
+
+
 @dataclass(frozen=True)
 class OpenMossConfig:
     endpoint_url: str
-    max_new_tokens: int = 6000
+    max_new_tokens: int = OPENMOSS_DEFAULT_MAX_NEW_TOKENS
     stream_chunk_frames: int = 16
     default_sample_rate: int = 48_000
     default_channels: int = 2
     sample_width: int = 2
     timeout_seconds: float | None = None
+
+    @classmethod
+    def from_connection(
+        cls,
+        endpoint_url: str,
+        configuration: Mapping[str, object] | None,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> "OpenMossConfig":
+        return cls(
+            endpoint_url,
+            **openmoss_performance_settings(configuration),
+            timeout_seconds=timeout_seconds,
+        )
 
     def __post_init__(self) -> None:
         if not self.endpoint_url.startswith(("http://", "https://")):
@@ -109,9 +282,10 @@ class OpenMossProvider:
             ).decode("ascii")
         if request.language:
             payload["language"] = request.language
-        sampling = dict(request.parameters)
+        sampling = dict(normalize_openmoss_sampling(request.parameters))
         if request.seed is not None:
             sampling["seed"] = request.seed
+        sampling = dict(normalize_openmoss_sampling(sampling))
         if sampling:
             payload["sampling"] = sampling
         http_request = urllib.request.Request(
@@ -143,7 +317,11 @@ class OpenMossProvider:
                         output.setnchannels(channels)
                         output.setsampwidth(self.config.sample_width)
                         output.setframerate(sample_rate)
-                        while block := response.read(64 * 1024):
+                        reader = getattr(response, "read1", response.read)
+                        first_audio_seconds: float | None = None
+                        while block := reader(64 * 1024):
+                            if first_audio_seconds is None:
+                                first_audio_seconds = time.monotonic() - started
                             output.writeframesraw(block)
                             byte_count += len(block)
             except urllib.error.HTTPError as exc:
@@ -173,5 +351,6 @@ class OpenMossProvider:
                 "characters": len(request.text),
                 "audio_bytes": byte_count,
                 "wall_seconds": time.monotonic() - started,
+                "first_audio_seconds": first_audio_seconds,
             },
         )

@@ -165,6 +165,13 @@ class GenerationRepository:
                 "SELECT 1 FROM jobs WHERE provider_instance_id = ? LIMIT 1",
                 (provider_id,),
             ).fetchone()
+            benchmark_running = connection.execute(
+                "SELECT 1 FROM connection_benchmark_runs "
+                "WHERE provider_instance_id = ? AND status = 'running' LIMIT 1",
+                (provider_id,),
+            ).fetchone()
+            if benchmark_running:
+                raise ValueError("Wait for the connection benchmark to finish first")
             if profile_in_use or job_in_use:
                 raise ValueError(
                     "Delete profiles and generation jobs using this TTS connection first"
@@ -354,6 +361,7 @@ class GenerationRepository:
         plan_id: str,
         voice_profile_id: str | None,
         provider_id: str,
+        connection_configuration_snapshot: dict[str, Any],
         profile_snapshot: dict[str, Any],
         profile_snapshot_sha256: str,
         chunks: list[tuple[SynthesisChunk, str, str]],
@@ -364,10 +372,11 @@ class GenerationRepository:
                 INSERT INTO jobs(
                     id, book_id, narration_plan_id, narrator_profile_id,
                     provider_instance_id,
+                    connection_configuration_snapshot_json,
                     voice_profile_snapshot_json, voice_profile_snapshot_sha256,
                     status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'ready')
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ready')
                 """,
                 (
                     job_id,
@@ -375,6 +384,11 @@ class GenerationRepository:
                     plan_id,
                     voice_profile_id,
                     provider_id,
+                    json.dumps(
+                        connection_configuration_snapshot,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
                     json.dumps(profile_snapshot, ensure_ascii=False, sort_keys=True),
                     profile_snapshot_sha256,
                 ),
@@ -419,7 +433,11 @@ class GenerationRepository:
                        COALESCE(j.voice_profile_snapshot_sha256, v.profile_sha256)
                            AS profile_sha256,
                        p.name AS provider_name, p.kind AS provider_kind,
-                       p.endpoint_url, p.configuration_json
+                       p.endpoint_url,
+                       COALESCE(
+                           j.connection_configuration_snapshot_json,
+                           p.configuration_json
+                       ) AS connection_configuration_json
                 FROM jobs j
                 JOIN books b ON b.id = j.book_id
                 LEFT JOIN narration_plans np ON np.id = j.narration_plan_id
@@ -434,7 +452,9 @@ class GenerationRepository:
             raise KeyError(f"Generation job not found: {job_id}")
         result = dict(row)
         result["profile"] = json.loads(result.pop("profile_json"))
-        result["provider_configuration"] = json.loads(result.pop("configuration_json"))
+        result["provider_configuration"] = json.loads(
+            result.pop("connection_configuration_json")
+        )
         return result
 
     def list_job_voice_snapshots(self) -> list[dict[str, Any]]:

@@ -13,6 +13,7 @@ class ProviderType:
     supports_instructions: bool
     supports_reference_audio: bool
     reference_audio_optional: bool
+    supports_sampling: bool
 
 
 PROVIDER_TYPES: tuple[ProviderType, ...] = (
@@ -23,6 +24,7 @@ PROVIDER_TYPES: tuple[ProviderType, ...] = (
         supports_instructions=True,
         supports_reference_audio=True,
         reference_audio_optional=True,
+        supports_sampling=True,
     ),
 )
 

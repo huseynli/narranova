@@ -128,6 +128,17 @@ class DeleteArtifacts:
             raise
         self._discard(staged)
 
+    def connection(self, provider_id: str) -> None:
+        self.generation.get_provider(provider_id)
+        benchmark_root = self.layout.benchmarks_root / provider_id
+        staged = self._stage(benchmark_root, "connection-benchmarks")
+        try:
+            self.generation.delete_provider(provider_id)
+        except Exception:
+            self._restore(staged, benchmark_root)
+            raise
+        self._discard(staged)
+
     def _artifact(self, relative_path: str) -> Path:
         path = (self.layout.root / relative_path).resolve()
         if not path.is_relative_to(self.layout.root):

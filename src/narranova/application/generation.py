@@ -7,7 +7,7 @@ import json
 import shutil
 import uuid
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, Mapping, Protocol
 
 from narranova.application.default_voices import (
     BUILTIN_VOICE_PREFIX,
@@ -20,11 +20,25 @@ from narranova.audio import AudioMasterInfo, FFmpegAudioMasters, validate_wave
 from narranova.domain.narration import NarrationPlan, text_sha256
 from narranova.persistence.books import BookRepository
 from narranova.persistence.generation import GenerationRepository
-from narranova.providers import OpenMossConfig, OpenMossProvider, SynthesisRequest, TTSProvider
+from narranova.providers import (
+    OpenMossConfig,
+    OpenMossProvider,
+    SynthesisRequest,
+    TTSProvider,
+    normalize_openmoss_sampling,
+)
 
 
 def _canonical_json(value: dict[str, object]) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def deterministic_chunk_seed(book_id: str, chapter_index: int, chunk_index: int) -> int:
+    """Return a stable positive OpenMOSS seed for one logical audiobook chunk."""
+
+    identity = f"narranova:chunk-seed:v1:{book_id}:{chapter_index}:{chunk_index}"
+    seed = int.from_bytes(hashlib.sha256(identity.encode("utf-8")).digest()[:4], "big")
+    return (seed & 0x7FFF_FFFF) or 1
 
 
 class AudioMasters(Protocol):
@@ -84,6 +98,7 @@ class VoiceProfiles:
         instruction: str,
         name: str | None = None,
         language: str = "English",
+        sampling: Mapping[str, object] | None = None,
     ) -> str:
         provider = self.repository.get_provider(provider_id)
         if provider["kind"] != "openmoss" or not provider["enabled"]:
@@ -93,6 +108,10 @@ class VoiceProfiles:
         if not reference_audio.is_file():
             raise FileNotFoundError(f"Reference audio not found: {reference_audio}")
         validate_wave(reference_audio)
+        OpenMossConfig.from_connection(
+            str(provider["endpoint_url"]), provider["configuration"]
+        )
+        sampling_overrides = normalize_openmoss_sampling(sampling)
         profile_id = uuid.uuid4().hex
         profile_name = (name or "Narrator profile").strip()
         if not profile_name:
@@ -107,6 +126,8 @@ class VoiceProfiles:
             "reference_artifact_path": destination.relative_to(self.layout.root).as_posix(),
             "reference_sha256": reference_hash,
         }
+        if sampling_overrides:
+            profile["sampling"] = dict(sampling_overrides)
         profile_hash = hashlib.sha256(_canonical_json(profile).encode("utf-8")).hexdigest()
         try:
             self.repository.add_voice_profile(
@@ -130,17 +151,25 @@ class VoiceProfiles:
         name: str,
         language: str = "English",
         reference_audio: Path | None = None,
+        sampling: Mapping[str, object] | None = None,
     ) -> None:
         current = self.repository.get_voice_and_provider(profile_id)
         provider = self.repository.get_provider(provider_id)
         if provider["kind"] != "openmoss":
             raise ValueError("This profile editor currently supports OpenMOSS profiles")
-        OpenMossConfig(str(provider["endpoint_url"]), **provider["configuration"])
+        OpenMossConfig.from_connection(
+            str(provider["endpoint_url"]), provider["configuration"]
+        )
         if not name.strip():
             raise ValueError("Voice profile name cannot be empty")
         if not instruction.strip():
             raise ValueError("Narrator instruction cannot be empty")
         current_profile = current["profile"]
+        sampling_overrides = (
+            normalize_openmoss_sampling(sampling)
+            if sampling is not None
+            else normalize_openmoss_sampling(current_profile.get("sampling"))
+        )
         old_reference = self._artifact_path(current_profile["reference_artifact_path"])
         destination = old_reference
         created_reference: Path | None = None
@@ -160,6 +189,8 @@ class VoiceProfiles:
             "reference_artifact_path": destination.relative_to(self.layout.root).as_posix(),
             "reference_sha256": reference_hash,
         }
+        if sampling_overrides:
+            profile["sampling"] = dict(sampling_overrides)
         profile_hash = hashlib.sha256(_canonical_json(profile).encode("utf-8")).hexdigest()
         try:
             self.repository.update_voice_profile(
@@ -243,6 +274,7 @@ class GenerationJobs:
         provider_id: str | None = None,
     ) -> str:
         narrator_profile_id: str | None = voice_profile_id
+        connection_configuration: dict[str, object]
         if voice_profile_id.startswith(BUILTIN_VOICE_PREFIX):
             if not provider_id:
                 raise ValueError("Choose a TTS connection for the built-in narrator")
@@ -259,6 +291,7 @@ class GenerationJobs:
             source_reference = pair.audio_path
             expected_reference_hash = pair.audio_sha256
             narrator_profile_id = None
+            connection_configuration = dict(provider["configuration"])
         else:
             voice = self.generation.get_voice_and_provider(voice_profile_id)
             if provider_id is not None and voice["provider_id"] != provider_id:
@@ -269,6 +302,7 @@ class GenerationJobs:
                 voice["profile"]["reference_artifact_path"]
             )
             expected_reference_hash = voice["profile"]["reference_sha256"]
+            connection_configuration = dict(voice["provider_configuration"])
         if not voice["enabled"]:
             raise ValueError("The selected TTS connection is disabled")
         plan_record = self.books.get_plan_record(book_id)
@@ -307,6 +341,7 @@ class GenerationJobs:
                 plan_id=plan_record["id"],
                 voice_profile_id=narrator_profile_id,
                 provider_id=voice["provider_id"],
+                connection_configuration_snapshot=connection_configuration,
                 profile_snapshot=profile,
                 profile_snapshot_sha256=profile_hash,
                 chunks=records,
@@ -362,6 +397,10 @@ class GenerationJobs:
                         language=profile.get("language"),
                         instruction=profile["instruction"],
                         reference_audio=reference,
+                        seed=deterministic_chunk_seed(
+                            str(job["book_id"]), chunk.chapter_index, chunk.chunk_index
+                        ),
+                        parameters=dict(profile.get("sampling") or {}),
                     )
                 )
                 if result.audio_path.resolve() != provider_output.resolve():
@@ -425,6 +464,10 @@ class GenerationJobs:
                     language=profile.get("language"),
                     instruction=profile["instruction"],
                     reference_audio=reference,
+                    seed=deterministic_chunk_seed(
+                        str(job["book_id"]), chunk.chapter_index, chunk.chunk_index
+                    ),
+                    parameters=dict(profile.get("sampling") or {}),
                 )
             )
             if result.audio_path.resolve() != provider_output.resolve():
@@ -557,4 +600,6 @@ class GenerationJobs:
         if job["provider_kind"] != "openmoss":
             raise ValueError(f"Unsupported provider kind: {job['provider_kind']}")
         configuration = dict(job["provider_configuration"])
-        return OpenMossProvider(OpenMossConfig(str(job["endpoint_url"]), **configuration))
+        return OpenMossProvider(
+            OpenMossConfig.from_connection(str(job["endpoint_url"]), configuration)
+        )

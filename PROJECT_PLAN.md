@@ -1,6 +1,6 @@
 # Narranova — Project Plan
 
-Last updated: 2026-09-02
+Last updated: 2026-09-03
 
 Product name: **Narranova**  
 Canonical domain: **narranova.app**  
@@ -42,6 +42,8 @@ Update it when a decision changes.
 9. Default to one active generation request per worker/provider to avoid
    overloading homelab inference servers.
 10. Preserve the proven OpenMOSS streaming path and GPU-selection workaround.
+11. Benchmark provider instances with fixed, book-independent material before
+    asking users to commit hours of generation time.
 
 ## Deployment architecture
 
@@ -103,9 +105,13 @@ The adapter must preserve the known-safe defaults:
 - `stream=true`
 - `response_format=pcm`
 - `stream_chunk_frames=16`
-- `max_new_tokens=6000` unless changed through an advanced setting
+- `max_new_tokens=6000` as an automatic safety/output ceiling
 - No `ref_text` during ordinary reference-audio voice cloning
 - The saved instruction and selected reference audio for every book chunk
+
+An OpenMOSS connection stores request-level performance settings, principally
+`stream_chunk_frames`. Narrator sampling and quality settings belong to Voice
+Lab profiles and are not connection benchmark controls.
 
 Do not change the working OpenMOSS model context or replace its runtime DLLs as
 part of this application.
@@ -280,6 +286,42 @@ request costs, rate limits, provider request IDs, and usage metadata later.
 Secrets are stored only by the backend and are never returned to the browser.
 Provider configuration must be administrator-only in a multi-user deployment.
 
+## Connection benchmarking and tuning
+
+The Connections page owns endpoint configuration, health testing, available
+OpenMOSS/model information, and performance benchmarking. Its OpenMOSS
+benchmark uses a fixed original passage of roughly one printed page, built-in
+narrator pair 01, its matching instruction, a fixed seed, and engine-default
+sampling. It never reads text from an imported book.
+
+The user-facing performance control is `stream_chunk_frames`, labelled
+**Streaming decode batch**, with supported benchmark values `16`, `32`, `64`,
+`128`, `256`, and `512`. One MOSS-TTS Local frame is approximately 80 ms, so
+the UI may show the approximate audio represented by each batch. Long-form
+generation continues to use streamed PCM. `max_new_tokens` is a safe automatic
+output ceiling, not a speed control, and does not appear among the ordinary
+benchmark controls.
+
+A single run may measure one selected batch. Auto-tune measures all six in
+ascending order, determines the best realtime throughput, and recommends the
+smallest batch within 3% of that peak. Applying a result persists the selected
+batch and recommendation with the connection. New generation jobs snapshot
+the connection configuration so later tuning cannot change an in-progress
+book. Voice Lab auditions use the connection's currently applied performance
+settings.
+
+Each result reports generated audio duration, TTS wall time, time to first
+audio when available, realtime speed, conventional real-time factor, and the
+tested batch. Any 40-hour projection is labelled **TTS generation only** and
+excludes queueing, retries, normalization, and M4B assembly.
+
+Hardware-side guidance remains informational because Narranova does not manage
+the external OpenMOSS process. It may discuss quantization, GPU offload, flash
+attention, context, and server launch configuration. Lower quantization reduces
+memory use and memory-bandwidth requirements and may improve throughput
+depending on the model, hardware, and backend. Keep flash attention enabled
+when supported unless benchmarking shows otherwise.
+
 ## EPUB ingestion and narration plan
 
 V1 supports DRM-free EPUB only.
@@ -352,7 +394,11 @@ built-in reference and instruction into its own immutable snapshot.
 7. After promotion, all unselected audition takes and other scratch files for
    that draft are deleted. Abandoned drafts are also subject to automatic
    expiry.
-8. Subsequent audiobook chunks use the same instruction and selected audio as
+8. Optional overrides for text/audio temperature, top-p, top-k, audio repetition
+   penalty, and seed live in a collapsed **Advanced quality & sampling** section.
+   Blank values mean Engine default and are omitted from the OpenMOSS request.
+   Each generated take records the explicit settings and seed that produced it.
+9. Subsequent audiobook chunks use the same instruction and selected audio as
    reference audio. They do not send `ref_text`.
 
 The application ships several editable example descriptions for audiobook
@@ -415,6 +461,9 @@ Rules:
 - Completed chunks are skipped after their audio and hashes are validated, but
   only while resuming their owning job. Every new narration job starts with
   fresh pending, job-owned chunks and never adopts audio from another job.
+- OpenMOSS audiobook chunks derive a deterministic seed from the book ID,
+  chapter index, and chunk index. A retry or explicit regeneration reuses the
+  same seed; different chunks receive different sampling sequences.
 - The job page polls structured status updates and patches progress in place;
   it must never refresh the whole document or interrupt chunk playback.
 - Chunk audio supports byte-range playback, and the local web server handles
@@ -427,6 +476,9 @@ Rules:
 - Default generation concurrency is one.
 - Retry policy, backoff, provider request IDs, timings, audio duration, RTF,
   character count, and errors are logged.
+- Every job snapshots the applied connection performance configuration and the
+  selected voice profile at creation. Connection tuning and later voice edits
+  therefore affect only new jobs.
 
 ## Audio and output policy
 
@@ -525,15 +577,17 @@ Web flow:
 2. Inspect metadata and narration plan.
 3. Enable or disable unwanted sections.
 4. Configure external engines on the dedicated TTS Connections page.
-5. Complete the provider-appropriate workflow on the dedicated Voice Lab page:
+5. Optionally test connectivity and benchmark the selected connection, then
+   apply a measured streaming decode batch.
+6. Complete the provider-appropriate workflow on the dedicated Voice Lab page:
    create reference audio first, then pair it with instructions and save a named
    profile.
-6. Open the narration creation page and select both the TTS connection and the
+7. Open the narration creation page and select both the TTS connection and the
    compatible saved voice profile.
-7. Start generation.
-8. Monitor, pause, resume, retry, or regenerate individual chunks.
-9. Review chunk artifacts, storage use, and errors.
-10. Download the M4B, narration map, and project metadata, then optionally
+8. Start generation.
+9. Monitor, pause, resume, retry, or regenerate individual chunks.
+10. Review chunk artifacts, storage use, and errors.
+11. Download the M4B, narration map, and project metadata, then optionally
     finalize the job to remove editable FLAC masters.
 
 The first UI should use server-rendered pages and limited JavaScript rather than
@@ -607,7 +661,8 @@ In scope:
 - Dedicated OpenMOSS provider
 - Optional external Kokoro provider
 - Provider capability discovery
-- MOSS description and five-take reference-selection workflow
+- Controlled OpenMOSS connection benchmarking and Auto-tune recommendation
+- MOSS instruction/reference workflow with iterative one-take auditions
 - Kokoro voice-selection and preview workflow
 - Persistent pause/resume/retry/cancel
 - Provider-WAV and lossless FLAC-master validation
@@ -689,6 +744,9 @@ V1 is complete when all of the following are true:
 15. Automated tests cover EPUB safety, plan integrity, provider payloads,
     pause/resume recovery, retry behavior, audio validation, selective rebuilds,
     metadata, and M4B chapter output.
+16. A user can test and benchmark an OpenMOSS connection without importing a
+    book, compare all six supported streaming batches using controlled inputs,
+    understand throughput metrics, and apply a recommendation to future jobs.
 
 ## Reference documentation
 

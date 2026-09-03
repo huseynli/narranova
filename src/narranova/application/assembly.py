@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from narranova.application.generation import deterministic_chunk_seed
 from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.audio import (
     AudioMasterInfo,
@@ -18,6 +19,7 @@ from narranova.audio import (
 from narranova.domain.narration import NarrationPlan
 from narranova.epub import EpubParser
 from narranova.persistence.generation import GenerationRepository, StoredChunk
+from narranova.providers import openmoss_performance_settings
 
 
 class M4BEncoder(Protocol):
@@ -109,6 +111,7 @@ class AudioAssembler:
             chapter_records.append(
                 self._chapter_map(
                     plan,
+                    str(job["book_id"]),
                     chapter_index,
                     title,
                     chapter_start,
@@ -220,6 +223,7 @@ class AudioAssembler:
     def _chapter_map(
         self,
         plan: NarrationPlan,
+        book_id: str,
         chapter_index: int,
         title: str,
         book_start: float,
@@ -239,6 +243,9 @@ class AudioAssembler:
                     "audio_sha256": chunk.audio_sha256,
                     "audio_format": "flac",
                     "audio_artifact_path": chunk.audio_artifact_path,
+                    "seed": deterministic_chunk_seed(
+                        book_id, chunk.chapter_index, chunk.chunk_index
+                    ),
                     "chapter_start_seconds": start,
                     "chapter_end_seconds": end,
                     "book_start_seconds": book_start + start,
@@ -274,6 +281,12 @@ class AudioAssembler:
         duration: float,
     ) -> dict[str, object]:
         profile = dict(job["profile"])
+        connection_configuration = dict(job.get("provider_configuration") or {})
+        performance = (
+            openmoss_performance_settings(connection_configuration)
+            if job.get("provider_kind") == "openmoss"
+            else connection_configuration
+        )
         return {
             "schema_version": 1,
             "job_id": job["id"],
@@ -286,6 +299,7 @@ class AudioAssembler:
                 "id": job.get("provider_instance_id"),
                 "name": job.get("provider_name"),
                 "kind": job.get("provider_kind"),
+                "performance": performance,
             },
             "voice": {
                 "name": profile.get("name"),
@@ -293,6 +307,7 @@ class AudioAssembler:
                 "instruction": profile.get("instruction"),
                 "profile_snapshot_sha256": job.get("profile_sha256"),
                 "reference_sha256": profile.get("reference_sha256"),
+                "sampling": profile.get("sampling") or {},
             },
             "chapters": chapters,
         }

@@ -10,7 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from narranova.audio import validate_wave
-from narranova.providers import OpenMossConfig, OpenMossProvider, SynthesisRequest
+from narranova.providers import (
+    OpenMossConfig,
+    OpenMossProvider,
+    SynthesisRequest,
+    openmoss_sampling_from_form,
+)
 
 
 def reference_wave(path: Path) -> None:
@@ -56,7 +61,64 @@ class OpenMossProviderTests(unittest.TestCase):
 
             sent = json.loads(urlopen.call_args.args[0].data)
             self.assertNotIn("reference_wav_b64", sent)
+            self.assertNotIn("sampling", sent)
             self.assertTrue(destination.is_file())
+
+    def test_serializes_only_explicit_sampling_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "audition.wav"
+            response = FakeResponse(
+                b"\x01\x00" * 240,
+                {"X-MOSS-Sample-Rate": "24000", "X-MOSS-Channels": "1"},
+            )
+            provider = OpenMossProvider(OpenMossConfig("http://moss.local:8000/tts"))
+            request = SynthesisRequest(
+                text="Try this voice.",
+                destination=destination,
+                instruction="A warm, measured narrator.",
+                seed=91,
+                parameters={"audio_temperature": 0.72, "text_top_k": 40, "seed": 44},
+            )
+
+            with patch.object(urllib.request, "urlopen", return_value=response) as urlopen:
+                provider.synthesize(request)
+
+            sent = json.loads(urlopen.call_args.args[0].data)
+            self.assertEqual(
+                sent["sampling"],
+                {"audio_temperature": 0.72, "text_top_k": 40, "seed": 91},
+            )
+            self.assertNotIn("audio_top_p", sent["sampling"])
+
+    def test_voice_sampling_form_omits_blanks_and_validates_values(self) -> None:
+        sampling = openmoss_sampling_from_form(
+            {
+                "text_temperature": "",
+                "audio_top_p": "0.92",
+                "audio_top_k": "64",
+                "seed": "1234",
+            }
+        )
+
+        self.assertEqual(
+            sampling,
+            {"audio_top_p": 0.92, "audio_top_k": 64, "seed": 1234},
+        )
+        with self.assertRaisesRegex(ValueError, "Audio top-p"):
+            openmoss_sampling_from_form({"audio_top_p": "1.5"})
+
+    def test_connection_configuration_uses_only_performance_settings(self) -> None:
+        config = OpenMossConfig.from_connection(
+            "http://moss.local:8000/tts",
+            {
+                "stream_chunk_frames": 128,
+                "recommended_stream_chunk_frames": 128,
+                "sampling": {"audio_temperature": 0.1},
+            },
+        )
+
+        self.assertEqual(config.stream_chunk_frames, 128)
+        self.assertEqual(config.max_new_tokens, 6000)
 
     def test_streams_safe_clone_payload_and_atomically_promotes_wave(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

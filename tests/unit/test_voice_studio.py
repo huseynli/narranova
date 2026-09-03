@@ -52,6 +52,7 @@ class VoiceStudioTests(unittest.TestCase):
                 instruction="A warmer literary narrator with measured pacing.",
                 sample_text=DEFAULT_SAMPLE_TEXT,
                 language="English",
+                sampling={"audio_temperature": 0.8, "seed": 123},
             )
             draft = studio.get(draft_id)
             selected_hash = next(
@@ -70,10 +71,16 @@ class VoiceStudioTests(unittest.TestCase):
             saved = generation.get_voice_and_provider(profile_id)
             saved_path = data / saved["profile"]["reference_artifact_path"]
             self.assertEqual(saved["profile"]["name"], "Warm literary")
+            self.assertEqual(
+                saved["profile"]["sampling"],
+                {"audio_temperature": 0.8, "seed": 123},
+            )
             self.assertEqual(store.sha256(saved_path), selected_hash)
             self.assertEqual(len(fake.requests), 2)
             self.assertIsNone(fake.requests[0].reference_audio)
             self.assertEqual(fake.requests[1].reference_audio, layout.voice_studio_take(draft_id, first_take))
+            self.assertEqual(fake.requests[1].parameters, {"audio_temperature": 0.8})
+            self.assertEqual(fake.requests[1].seed, 123)
             self.assertFalse(layout.voice_studio_draft(draft_id).exists())
 
     def test_generation_failure_keeps_uploaded_reference_for_retry(self) -> None:

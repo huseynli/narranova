@@ -35,6 +35,7 @@ class ArtifactLayoutTests(unittest.TestCase):
 
             self.assertTrue(layout.books_root.is_dir())
             self.assertTrue(layout.temporary_root.is_dir())
+            self.assertTrue(layout.benchmarks_root.is_dir())
 
     def test_rejects_path_traversal_in_ids(self) -> None:
         layout = ArtifactLayout.at(Path("/tmp/narranova-test"))
@@ -162,10 +163,19 @@ class DatabaseTests(unittest.TestCase):
                     (4, "self_contained_job_voices"),
                     (5, "output_artifacts"),
                     (6, "job_storage"),
+                    (8, "connection_performance"),
                 ],
             )
             self.assertTrue(
-                {"books", "jobs", "chunks", "artifacts", "narrator_profiles"} <= tables
+                {
+                    "books",
+                    "jobs",
+                    "chunks",
+                    "artifacts",
+                    "narrator_profiles",
+                    "connection_benchmark_runs",
+                }
+                <= tables
             )
 
     def test_cli_init_creates_database_and_artifact_roots(self) -> None:

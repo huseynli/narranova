@@ -6,13 +6,18 @@ import unittest
 import wave
 from pathlib import Path
 
-from narranova.application.generation import GenerationJobs, VoiceProfiles
+from narranova.application.generation import (
+    GenerationJobs,
+    VoiceProfiles,
+    deterministic_chunk_seed,
+)
 from narranova.application.ingest import ImportBook
 from narranova.application.revise_plan import ReviseNarrationPlan
 from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.audio import AudioMasterInfo, validate_wave
 from narranova.epub import EpubParser
 from narranova.persistence import Database
+from narranova.persistence.benchmarks import BenchmarkRepository
 from narranova.persistence.books import BookRepository
 from narranova.persistence.generation import GenerationRepository
 from narranova.providers.base import SynthesisRequest, SynthesisResult
@@ -69,6 +74,15 @@ class FakeAudioMasters:
 
 
 class GenerationJobTests(unittest.TestCase):
+    def test_chunk_seed_is_stable_distinct_and_openmoss_safe(self) -> None:
+        first = deterministic_chunk_seed("book-a", 1, 2)
+
+        self.assertEqual(first, deterministic_chunk_seed("book-a", 1, 2))
+        self.assertNotEqual(first, deterministic_chunk_seed("book-a", 1, 3))
+        self.assertNotEqual(first, deterministic_chunk_seed("book-b", 1, 2))
+        self.assertGreater(first, 0)
+        self.assertLessEqual(first, 2_147_483_647)
+
     def test_job_generates_resumes_and_repairs_corrupt_completed_audio(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -105,7 +119,27 @@ class GenerationJobTests(unittest.TestCase):
                 masters=FakeAudioMasters(),
             )
 
+            benchmarks = BenchmarkRepository(database)
+            benchmarks.apply_frames(
+                provider_id=provider_id,
+                selected_frames=128,
+                recommended_frames=128,
+                benchmark_id="first-benchmark",
+            )
+
             job_id = jobs.create(imported.book_id, profile_id)
+            benchmarks.apply_frames(
+                provider_id=provider_id,
+                selected_frames=256,
+                recommended_frames=256,
+                benchmark_id="later-benchmark",
+            )
+            self.assertEqual(
+                generation.get_job(job_id)["provider_configuration"][
+                    "stream_chunk_frames"
+                ],
+                128,
+            )
             profiles.update_openmoss_profile(
                 profile_id,
                 provider_id=provider_id,
@@ -128,6 +162,15 @@ class GenerationJobTests(unittest.TestCase):
             self.assertTrue(all(chunk.status == "completed" for chunk in chunks))
             self.assertEqual(len(fake.requests), len(chunks))
             self.assertTrue(all(request.reference_audio.is_file() for request in fake.requests))
+            self.assertEqual(
+                [request.seed for request in fake.requests],
+                [
+                    deterministic_chunk_seed(
+                        imported.book_id, chunk.chapter_index, chunk.chunk_index
+                    )
+                    for chunk in chunks
+                ],
+            )
 
             jobs.run(job_id)
             self.assertEqual(len(fake.requests), len(chunks))
@@ -272,6 +315,13 @@ class GenerationJobTests(unittest.TestCase):
             self.assertEqual(
                 generation.get_chunk(job_id, selected.database_id).attempts,
                 4,
+            )
+            selected_seed = deterministic_chunk_seed(
+                imported.book_id, selected.chapter_index, selected.chunk_index
+            )
+            self.assertEqual(fake.requests[0].seed, selected_seed)
+            self.assertTrue(
+                all(request.seed == selected_seed for request in fake.requests[len(chunks):])
             )
 
     def test_legacy_zero_attempt_audio_is_removed_and_job_is_reopened(self) -> None:

@@ -40,11 +40,16 @@ class ArtifactLayout:
     def voice_studio_root(self) -> Path:
         return self.temporary_root / "voice-studio"
 
+    @property
+    def benchmarks_root(self) -> Path:
+        return self.root / "benchmarks"
+
     def initialize(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.books_root.mkdir(exist_ok=True)
         self.voices_root.mkdir(exist_ok=True)
         self.temporary_root.mkdir(exist_ok=True)
+        self.benchmarks_root.mkdir(exist_ok=True)
 
     def book_root(self, book_id: str) -> Path:
         return self.books_root / _validate_id(book_id, "book id")
@@ -123,3 +128,27 @@ class ArtifactLayout:
     def voice_studio_take(self, draft_id: str, take_id: str) -> Path:
         safe_take_id = _validate_id(take_id, "voice studio take id")
         return self.voice_studio_draft(draft_id) / "takes" / f"{safe_take_id}.wav"
+
+    def connection_benchmark_root(self, provider_id: str, benchmark_id: str) -> Path:
+        safe_provider_id = _validate_id(provider_id, "provider id")
+        safe_benchmark_id = _validate_id(benchmark_id, "benchmark id")
+        return self.benchmarks_root / safe_provider_id / safe_benchmark_id
+
+    def connection_benchmark_sample(
+        self, provider_id: str, benchmark_id: str, stream_chunk_frames: int
+    ) -> Path:
+        if stream_chunk_frames <= 0:
+            raise ValueError("Streaming decode batch must be positive")
+        return self.connection_benchmark_root(provider_id, benchmark_id) / (
+            f"frames-{stream_chunk_frames}.flac"
+        )
+
+    def connection_benchmark_temporary(
+        self, benchmark_id: str, stream_chunk_frames: int
+    ) -> Path:
+        safe_benchmark_id = _validate_id(benchmark_id, "benchmark id")
+        if stream_chunk_frames <= 0:
+            raise ValueError("Streaming decode batch must be positive")
+        return self.temporary_root / (
+            f"benchmark-{safe_benchmark_id}-frames-{stream_chunk_frames}.wav"
+        )

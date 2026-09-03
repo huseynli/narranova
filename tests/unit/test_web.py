@@ -278,6 +278,22 @@ class WebAppTests(unittest.TestCase):
             )
             self.assertIn(b'action="/connections"', connections)
             self.assertIn(b'name="kind"', connections)
+            self.assertIn(f'/connections/{provider_id}/benchmark'.encode(), connections)
+            self.assertIn(f'/connections/{provider_id}/test'.encode(), connections)
+
+            status, _, benchmark = request(
+                app, f"/connections/{provider_id}/benchmark"
+            )
+            self.assertEqual(status, "200 OK")
+            self.assertIn(b"Streaming decode batch", benchmark)
+            self.assertIn(b"Run Auto-tune", benchmark)
+            for frames in (16, 32, 64, 128, 256, 512):
+                self.assertIn(f'value="{frames}"'.encode(), benchmark)
+            self.assertNotIn(b'text_temperature', benchmark)
+            self.assertNotIn(b'audio_temperature', benchmark)
+            self.assertNotIn(b'name="max_new_tokens"', benchmark)
+            self.assertIn(b"Lower quantization reduces memory use", benchmark)
+            self.assertIn(b"Keep enabled when supported", benchmark)
 
             _, headers, voices = request(app, "/voices")
             cookie = next(value for name, value in headers if name == "Set-Cookie")
@@ -317,6 +333,11 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"Warm literary", studio)
             self.assertIn(b"The rain had stopped", studio)
             self.assertIn(b"No source reference", studio)
+            self.assertIn(b"Advanced quality &amp; sampling", studio)
+            self.assertIn(b'name="text_temperature"', studio)
+            self.assertIn(b'name="audio_repetition_penalty"', studio)
+            self.assertIn(b'name="seed"', studio)
+            self.assertIn(b"Engine default", studio)
             self.assertNotIn(b"Existing saved reference", studio)
             self.assertNotIn(b"Existing saved voice", studio)
             self.assertNotIn(b'name="book_id"', studio)
@@ -354,6 +375,8 @@ class WebAppTests(unittest.TestCase):
                         "name": "Renamed voice",
                         "instruction": "A warmer narrator.",
                         "language": "English",
+                        "audio_temperature": "0.7",
+                        "seed": "42",
                     }
                 ).encode(),
                 cookie=cookie,
@@ -362,6 +385,10 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(
                 app.generation.get_voice_and_provider(profile_id)["profile"]["name"],
                 "Renamed voice",
+            )
+            self.assertEqual(
+                app.generation.get_voice_and_provider(profile_id)["profile"]["sampling"],
+                {"audio_temperature": 0.7, "seed": 42},
             )
 
             status, _, _ = request(
@@ -399,6 +426,42 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(status, "303 See Other")
             self.assertEqual(app.generation.list_voice_profiles(), [])
             self.assertEqual(app.generation.list_providers(), [])
+
+    def test_connection_auto_tune_route_creates_a_controlled_background_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = create_web_app(Path(temporary) / "data")
+            provider_id = app.profiles.add_openmoss_provider(
+                "Bench MOSS", "http://moss.test:8000/tts"
+            )
+            _, headers, _ = request(
+                app, f"/connections/{provider_id}/benchmark"
+            )
+            cookie = next(value for name, value in headers if name == "Set-Cookie")
+            token = cookie.split(";", 1)[0].split("=", 1)[1]
+            started: list[str] = []
+            app.benchmark_supervisor.start = started.append
+
+            status, response_headers, _ = request(
+                app,
+                f"/connections/{provider_id}/benchmarks",
+                method="POST",
+                body=urlencode({"csrf": token, "mode": "auto"}).encode(),
+                cookie=cookie,
+            )
+
+            self.assertEqual(status, "303 See Other")
+            self.assertIn(
+                "Benchmark+started",
+                next(value for name, value in response_headers if name == "Location"),
+            )
+            run = app.benchmarks.repository.get_run(started[0])
+            self.assertEqual(run.requested_frames, (16, 32, 64, 128, 256, 512))
+            status, _, state_body = request(
+                app,
+                f"/connections/{provider_id}/benchmarks/{run.id}/status",
+            )
+            self.assertEqual(status, "200 OK")
+            self.assertEqual(json.loads(state_body)["total"], 6)
 
     def test_voice_profile_marks_unfinished_job_usage_until_completion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
