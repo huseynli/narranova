@@ -62,8 +62,8 @@ Docker Compose is the recommended way to run Narranova. You need:
 Clone the repository and start the service:
 
 ```console
-git clone https://github.com/huseynli/NarraNova.git
-cd NarraNova
+git clone https://github.com/huseynli/narranova.git
+cd narranova
 docker compose up --detach --build
 docker compose ps
 ```
