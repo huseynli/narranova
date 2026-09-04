@@ -13,9 +13,10 @@ starting the entire book again.
 Website: [narranova.app](https://narranova.app)
 
 > [!IMPORTANT]
-> Narranova does not include a TTS model or runtime. [OpenMOSS](https://github.com/pwilkin/openmoss) currently runs as
-> a separate service (with [moss-tts-local-gguf](https://huggingface.co/ilintar/moss-tts-local-gguf)) and Narranova connects to its `/tts` endpoint.
-> Examine the [OpenMOSS](https://github.com/pwilkin/openmoss) repo. Cool project! A lifesaver especially for Windows Vulkan AMD users!
+> Narranova does not include a TTS model or runtime. Run
+> [pwilkin/OpenMOSS](https://github.com/pwilkin/openmoss) separately with a
+> [moss-tts-local-gguf](https://huggingface.co/ilintar/moss-tts-local-gguf)
+> model, then connect Narranova to its `/tts` endpoint.
 
 ## What Narranova does
 
@@ -38,71 +39,18 @@ applied to a separate, hashed TTS-input snapshot belonging to the job.
 
 ## Features
 
-### Book library and narration planning
-
-- Defensive EPUB ZIP/XML parsing with archive traversal and expansion checks
-- Metadata, author, language, spine, navigation, and cover extraction
-- Reviewable, source-mapped narration sections
-- Automatic saving when sections are included or excluded
-- Immutable plan revisions, so existing jobs do not change when a plan changes
-- Safe deletion of a book together with its jobs and generated audiobooks
-
-### Narration Enhancement
-
-Narranova can deterministically prepare text for narration without using an LLM
-or rewriting the author's prose:
-
-- Configurable pauses after chapter and section headings
-- Scene-break pauses for `<hr>`, `***`, `* * *`, and similar separators
-- TTS normalization for common whitespace, quote, ellipsis, dash, and
-  non-breaking-space variants
-- A per-book `term = IPA` pronunciation dictionary
-- Native MOSS-TTS `[pause X.Ys]` controls and slash-wrapped `/IPA/`
-- Per-book enable/disable controls with settings snapshotted into each new job
-
-Normal paragraphs do not receive additional pause tags.
-
-### Connections and performance
-
-- Multiple saved TTS connections with automatic health indicators
-- A dedicated OpenMOSS adapter for streamed PCM generation
-- Connection benchmarks using fixed sample text and included narrator audio
-- Reported generation time, audio duration, and real-time factor
-- Auto-tuning across supported streaming decode batch sizes
-- Saved performance settings for future jobs
-
-### Voices and Voice Lab
-
-- Two included narrator instruction/reference pairs
-- Preview included and custom voices before creating a job
-- Create reference candidates from narration instructions
-- Upload an existing reference recording and audition it against test sentences
-- Optional MOSS-TTS sampling controls and deterministic candidate seeds
-- Save, rename, edit, or delete reusable custom voice profiles
-- Protection against deleting a profile while an unfinished job uses it
-- Automatic cleanup of discarded Voice Lab candidates
-
-### Reliable audiobook generation
-
-- Provider-sized chunks built on paragraph and sentence boundaries
-- Background generation with live progress that does not refresh the page
-- Pause after the current chunk or chapter, resume later, or stop a job
-- Retry handling and durable diagnostics for transient connection failures
-- Deterministic per-chunk seeds for repeatable retry and regeneration behavior
-- Playback, download, deletion, and selective regeneration of completed chunks
-- SQLite work leases that prevent duplicate generation against the same job or
-  TTS connection
-- Recovery of interrupted jobs after an application or container restart
-
-### Audio and export
-
-- Validation of streamed WAV responses before promotion
-- Lossless 48 kHz mono FLAC working masters
-- Chapterized AAC M4B export with title, author, cover art, and chapter markers
-- Direct FLAC-to-M4B assembly without storing duplicate chapter WAV files
-- A source-mapped narration report with settings and artifact hashes
-- Storage finalization that removes editable FLAC masters after the M4B is
-  approved
+- Import DRM-free EPUBs and choose exactly which sections to narrate
+- Extract book metadata, navigation, and cover art automatically
+- Add deterministic heading and scene-break pauses without rewriting the prose
+- Normalize text and define per-book IPA pronunciations
+- Save, monitor, benchmark, and tune OpenMOSS connections
+- Use included narrator pairs or build reusable custom voice profiles
+- Generate in the background with reliable pause, resume, retry, and recovery
+- Listen to, download, delete, or regenerate individual audio chunks
+- Keep compact lossless FLAC working files instead of large WAV collections
+- Export a chapterized M4B with metadata, cover art, and chapter markers
+- Delete books together with their jobs and generated audiobooks
+- Finalize completed projects to remove working audio and reclaim storage
 
 ## Quick start with Docker
 
@@ -128,10 +76,10 @@ health check, and stores all persistent state in the `narranova-data` volume at
 
 ### Connect OpenMOSS
 
-Install and run [MOSS-TTS](https://github.com/OpenMOSS/MOSS-TTS) with the
-OpenMOSS server project wherever you want to host inference. Then open
-Narranova's **Connections** page and enter a reachable OpenMOSS `/tts` endpoint.
-How the two services are networked is up to your deployment.
+Run [pwilkin/OpenMOSS](https://github.com/pwilkin/openmoss) wherever you want to
+host inference and use a model from
+[moss-tts-local-gguf](https://huggingface.co/ilintar/moss-tts-local-gguf). Then
+open Narranova's **Connections** page and enter its reachable `/tts` endpoint.
 
 The default Compose file builds `narranova:local`, publishes port `8787`, uses
 the `UTC` timezone, and persists `/data` in the `narranova-data` volume. Edit
