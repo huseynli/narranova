@@ -57,6 +57,52 @@ The disposable audiobook and OpenMOSS WebUI prototypes have been removed.
 Verified lessons were reimplemented behind Narranova's production boundaries;
 the external MOSS runtime remains a separate service.
 
+## Docker
+
+Build and start Narranova with its persistent named volume:
+
+```console
+cp .env.example .env
+docker compose up --detach --build
+docker compose ps
+```
+
+Open `http://127.0.0.1:8787`. The image runs as an unprivileged user, includes
+FFmpeg for FLAC normalization and M4B assembly, and stores the SQLite database
+and all artifacts in the `narranova-data` volume mounted at `/data`.
+
+OpenMOSS is not included in this Compose project. If it runs on the Docker
+host, register `http://host.docker.internal:8000/tts` in Narranova rather than
+`127.0.0.1`; a host-gateway alias is provided for Linux and Docker Desktop.
+Use an ordinary service hostname instead when OpenMOSS runs elsewhere on a
+trusted network.
+
+Narranova has no built-in authentication yet. Keep port 8787 private or place
+it behind an authenticating reverse proxy before exposing it beyond a trusted
+network.
+
+### Backup and upgrade
+
+Stop the application before copying the SQLite database and artifacts so the
+backup is consistent:
+
+```console
+docker compose stop
+docker run --rm --volume narranova-data:/data:ro --volume "$PWD":/backup \
+  alpine tar -czf /backup/narranova-backup.tgz -C /data .
+docker compose start
+```
+
+Restore only into an empty `narranova-data` volume while the application is
+stopped. To upgrade a source checkout, back up first, then rebuild and restart;
+forward-only database migrations run automatically at startup:
+
+```console
+docker compose build --pull
+docker compose up --detach
+docker compose ps
+```
+
 ## External OpenMOSS generation
 
 With OpenMOSS already running separately, register its endpoint. Each command
