@@ -13,8 +13,9 @@ starting the entire book again.
 Website: [narranova.app](https://narranova.app)
 
 > [!IMPORTANT]
-> Narranova does not include a TTS model or runtime. OpenMOSS currently runs as
-> a separate service and Narranova connects to its `/tts` endpoint.
+> Narranova does not include a TTS model or runtime. [OpenMOSS](https://github.com/pwilkin/openmoss) currently runs as
+> a separate service (with [moss-tts-local-gguf](https://huggingface.co/ilintar/moss-tts-local-gguf)) and Narranova connects to its `/tts` endpoint.
+> Examine the [OpenMOSS](https://github.com/pwilkin/openmoss) repo. Cool project! A lifesaver especially for Windows Vulkan AMD users!
 
 ## What Narranova does
 
@@ -56,7 +57,7 @@ or rewriting the author's prose:
 - TTS normalization for common whitespace, quote, ellipsis, dash, and
   non-breaking-space variants
 - A per-book `term = IPA` pronunciation dictionary
-- Native OpenMOSS `[pause X.Ys]` controls and slash-wrapped `/IPA/`
+- Native MOSS-TTS `[pause X.Ys]` controls and slash-wrapped `/IPA/`
 - Per-book enable/disable controls with settings snapshotted into each new job
 
 Normal paragraphs do not receive additional pause tags.
@@ -72,11 +73,11 @@ Normal paragraphs do not receive additional pause tags.
 
 ### Voices and Voice Lab
 
-- Two included OpenMOSS narrator instruction/reference pairs
+- Two included narrator instruction/reference pairs
 - Preview included and custom voices before creating a job
 - Create reference candidates from narration instructions
 - Upload an existing reference recording and audition it against test sentences
-- Optional OpenMOSS sampling controls and deterministic candidate seeds
+- Optional MOSS-TTS sampling controls and deterministic candidate seeds
 - Save, rename, edit, or delete reusable custom voice profiles
 - Protection against deleting a profile while an unfinished job uses it
 - Automatic cleanup of discarded Voice Lab candidates
