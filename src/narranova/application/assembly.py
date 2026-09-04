@@ -288,6 +288,7 @@ class AudioAssembler:
                 {
                     "id": chunk.id,
                     "text_sha256": chunk.text_sha256,
+                    "synthesis_text_sha256": chunk.synthesis_text_sha256,
                     "audio_sha256": chunk.audio_sha256,
                     "audio_format": "flac",
                     "audio_artifact_path": chunk.audio_artifact_path,
@@ -357,6 +358,7 @@ class AudioAssembler:
                 "reference_sha256": profile.get("reference_sha256"),
                 "sampling": profile.get("sampling") or {},
             },
+            "narration_enhancement": job.get("narration_enhancement"),
             "chapters": chapters,
         }
 

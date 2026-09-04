@@ -31,6 +31,11 @@ from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.audio import FFmpegAudioMasters, validate_wave
 from narranova.config import Settings
 from narranova.domain.narration import NarrationPlan
+from narranova.domain.enhancement import (
+    NarrationEnhancementSettings,
+    format_pronunciations,
+    parse_pronunciations,
+)
 from narranova.epub import EpubParser
 from narranova.persistence import Database
 from narranova.persistence.benchmarks import BenchmarkRepository, StoredBenchmarkRun
@@ -634,6 +639,27 @@ class NarranovaWebApp:
                 else "Narration+choices+unchanged"
             )
             return self._redirect(start_response, f"/books/{parts[1]}?notice={notice}")
+        if len(parts) == 3 and parts[0] == "books" and parts[2] == "enhancement":
+            settings = NarrationEnhancementSettings(
+                enabled=fields.get("enabled") == "on",
+                chapter_pause_seconds=float(
+                    fields.get("chapter_pause_seconds", "1.8")
+                ),
+                section_pause_seconds=float(
+                    fields.get("section_pause_seconds", "1.2")
+                ),
+                scene_break_pause_seconds=float(
+                    fields.get("scene_break_pause_seconds", "1.5")
+                ),
+                normalize_text=fields.get("normalize_text") == "on",
+                pronunciation_enabled=fields.get("pronunciation_enabled") == "on",
+                pronunciations=parse_pronunciations(fields.get("pronunciations", "")),
+            )
+            self.books.save_enhancement_settings(parts[1], settings)
+            return self._redirect(
+                start_response,
+                f"/books/{parts[1]}?notice=Narration+enhancement+saved",
+            )
         if len(parts) == 3 and parts[0] == "books" and parts[2] == "jobs":
             job_id = self.jobs.create(
                 parts[1],
@@ -1077,7 +1103,8 @@ class NarranovaWebApp:
                 needs.append(f'<form method="post" action="/voices/drafts" class="setup-missing">{self._csrf(csrf)}<span>02</span><div><strong>Create a voice profile</strong><small>Audition a reusable instruction and reference pair.</small></div><button aria-label="Open Voice Lab">→</button></form>')
             setup = f'<div class="missing-stack">{"".join(needs)}</div>'
         jobs = self.generation.list_jobs(book_id)
-        body = f"""<a class="back" href="/books/{self._e(book_id)}">← Back to book</a><section class="page-heading narration-heading full-page-heading"><div><p class="eyebrow">New narration</p><h1>{self._e(book.title)}</h1><p>Choose the engine and the approved voice pair for this run.</p></div></section><div class="narration-grid"><main class="panel narration-setup"><header><div><p class="eyebrow">Generation setup</p><h2>How should this book sound?</h2></div></header>{setup}</main><aside class="run-summary"><section class="panel"><header><div><p class="eyebrow">Plan summary</p><h2>Ready to generate</h2></div></header><dl><div><dt>Plan revision</dt><dd>{record['revision']}</dd></div><div><dt>Sections</dt><dd>{len(plan.chapters)}</dd></div><div><dt>Included units</dt><dd>{enabled_units}</dd></div><div><dt>Previous jobs</dt><dd>{len(jobs)}</dd></div></dl><a class="button" href="/books/{self._e(book_id)}">Review narration sections</a></section></aside></div>"""
+        enhancement = self.books.get_enhancement_settings(book_id)
+        body = f"""<a class="back" href="/books/{self._e(book_id)}">← Back to book</a><section class="page-heading narration-heading full-page-heading"><div><p class="eyebrow">New narration</p><h1>{self._e(book.title)}</h1><p>Choose the engine and the approved voice pair for this run.</p></div></section><div class="narration-grid"><main class="panel narration-setup"><header><div><p class="eyebrow">Generation setup</p><h2>How should this book sound?</h2></div></header>{setup}</main><aside class="run-summary"><section class="panel"><header><div><p class="eyebrow">Plan summary</p><h2>Ready to generate</h2></div></header><dl><div><dt>Plan revision</dt><dd>{record['revision']}</dd></div><div><dt>Sections</dt><dd>{len(plan.chapters)}</dd></div><div><dt>Included units</dt><dd>{enabled_units}</dd></div><div><dt>Enhancement</dt><dd>{'On' if enhancement.enabled else 'Off'}</dd></div><div><dt>Previous jobs</dt><dd>{len(jobs)}</dd></div></dl><a class="button" href="/books/{self._e(book_id)}">Review plan &amp; enhancement</a></section></aside></div>"""
         return self._layout("New narration", body, environ)
 
     def _book(self, book_id: str, environ: dict[str, object], csrf: str) -> str:
@@ -1088,6 +1115,7 @@ class NarranovaWebApp:
             raise RuntimeError("Narration plan failed hash validation")
         plan = NarrationPlan.from_json(plan_path.read_text(encoding="utf-8"))
         jobs = self.generation.list_jobs(book_id)
+        enhancement = self.books.get_enhancement_settings(book_id)
         units_by_id = {unit.id: unit for unit in plan.units}
         chapter_markup: list[str] = []
         for index, chapter in enumerate(plan.chapters):
@@ -1095,7 +1123,7 @@ class NarranovaWebApp:
             chapter_enabled = all(unit.enabled for unit in chapter_units)
             checked = " checked" if chapter_enabled else ""
             units_markup = "".join(
-                f'<p><span>{self._e(unit.id)}</span>{self._e(unit.display_text)}</p>'
+                f'<p><span>{self._e(unit.id)}</span>{self._e(unit.display_text) if unit.display_text else "Scene break"}</p>'
                 for unit in chapter_units
             )
             chapter_markup.append(
@@ -1110,9 +1138,10 @@ class NarranovaWebApp:
             f'<a class="job-row" href="/jobs/{self._e(job.id)}"><span><strong>Narration {self._e(job.id[:8])}</strong><small>{self._e(job.created_at)}</small></span><span class="status status-{self._e(job.status)}">{self._e(job.status)}</span></a>'
             for job in jobs
         ) or '<div class="empty">No generation job yet.</div>'
+        enhancement_form = f"""<section class="panel enhancement-card"><header><div><p class="eyebrow">Narration enhancement</p><h2>Shape the spoken text</h2><p class="section-help">Deterministic controls applied only to new TTS jobs. Your extracted book text stays unchanged.</p></div></header><form method="post" action="/books/{self._e(book_id)}/enhancement" class="enhancement-form">{self._csrf(csrf)}<label class="setting-switch"><span><strong>Use narration enhancement</strong><small>Add structural pauses and optional pronunciation controls.</small></span><input type="checkbox" name="enabled"{' checked' if enhancement.enabled else ''}></label><div class="pause-grid"><label>Chapter heading pause<input type="number" name="chapter_pause_seconds" min="0.1" max="10" step="0.1" value="{enhancement.chapter_pause_seconds:.1f}"><small>seconds</small></label><label>Section heading pause<input type="number" name="section_pause_seconds" min="0.1" max="10" step="0.1" value="{enhancement.section_pause_seconds:.1f}"><small>seconds</small></label><label>Scene break pause<input type="number" name="scene_break_pause_seconds" min="0.1" max="10" step="0.1" value="{enhancement.scene_break_pause_seconds:.1f}"><small>seconds</small></label></div><label class="setting-switch"><span><strong>Normalize text for TTS</strong><small>Standardize whitespace, quotes, ellipses, and dash spacing.</small></span><input type="checkbox" name="normalize_text"{' checked' if enhancement.normalize_text else ''}></label><label class="setting-switch"><span><strong>Use pronunciation dictionary</strong><small>Replace matching terms with OpenMOSS IPA before synthesis.</small></span><input type="checkbox" name="pronunciation_enabled"{' checked' if enhancement.pronunciation_enabled else ''}></label><label>Pronunciation dictionary<small>One entry per line using <code>term = IPA</code>. Slashes are optional.</small><textarea name="pronunciations" rows="5" placeholder="Narranova = næɹəˈnoʊvə">{self._e(format_pronunciations(enhancement.pronunciations))}</textarea></label><button class="primary wide-button">Save enhancement settings</button></form></section>"""
         body = f"""<a class="back" href="/">← Workspace</a><section class="book-head full-page-heading"><div><p class="eyebrow">Book workspace</p><h1>{self._e(book.title)}</h1><p>{self._e(book.author or 'Unknown author')} · {len(plan.chapters)} sections · <span data-plan-enabled-units>{enabled_units}</span> of {len(plan.units)} units included</p></div><div class="head-actions"><a class="danger-link" href="/books/{self._e(book_id)}/delete">Delete book</a></div></section>
         <div class="book-grid"><main><section class="panel"><form class="plan-form" method="post" action="/books/{self._e(book_id)}/plan" data-plan-form>{self._csrf(csrf)}<header><div><p class="eyebrow">Narration plan · revision <span data-plan-revision>{record['revision']}</span></p><h2>Choose what to narrate</h2><p class="section-help">Turn off front matter, tables of contents, copyright pages, or any other section you do not want spoken.</p></div><span class="auto-save-status" data-plan-status>Changes save automatically</span></header>{chapters}<div class="plan-note"><span>Every toggle is saved automatically. The current choices will be used by the next narration job; existing jobs keep their original text.</span></div></form></section></main>
-        <aside class="stack"><section class="panel book-workflow"><header><div><p class="eyebrow">New narration</p><h2>Turn this plan into audio</h2></div></header><div class="book-workflow-body"><p>Choose a TTS connection and narrator pair for a new job using plan revision <span data-plan-workflow-revision>{record['revision']}</span>.</p><a class="button primary" data-plan-next href="/books/{self._e(book_id)}/narrations/new">Set up narration</a></div></section><section class="panel"><header><div><p class="eyebrow">Activity</p><h2>Generation jobs</h2></div><span class="count">{len(jobs):02d}</span></header>{job_rows}</section></aside></div>"""
+        <aside class="stack"><section class="panel book-workflow"><header><div><p class="eyebrow">New narration</p><h2>Turn this plan into audio</h2></div></header><div class="book-workflow-body"><p>Choose a TTS connection and narrator pair for a new job using plan revision <span data-plan-workflow-revision>{record['revision']}</span>.</p><a class="button primary" data-plan-next href="/books/{self._e(book_id)}/narrations/new">Set up narration</a></div></section>{enhancement_form}<section class="panel"><header><div><p class="eyebrow">Activity</p><h2>Generation jobs</h2></div><span class="count">{len(jobs):02d}</span></header>{job_rows}</section></aside></div>"""
         return self._layout(book.title, body, environ)
 
     def _job(self, job_id: str, environ: dict[str, object], csrf: str) -> str:

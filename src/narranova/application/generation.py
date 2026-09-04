@@ -20,8 +20,9 @@ from narranova.application.provider_catalog import provider_type
 from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.audio import AudioMasterInfo, FFmpegAudioMasters, validate_wave
 from narranova.domain.narration import NarrationPlan, text_sha256
+from narranova.domain.enhancement import NarrationEnhancer
 from narranova.persistence.books import BookRepository
-from narranova.persistence.generation import GenerationRepository
+from narranova.persistence.generation import GenerationRepository, StoredChunk
 from narranova.providers import (
     OpenMossConfig,
     OpenMossProvider,
@@ -322,6 +323,8 @@ class GenerationJobs:
         if not chunks:
             raise ValueError("Narration plan has no enabled text")
         job_id = uuid.uuid4().hex
+        enhancement_settings = self.books.get_enhancement_settings(book_id)
+        enhancer = NarrationEnhancer(enhancement_settings)
         profile = dict(voice["profile"])
         records = []
         try:
@@ -340,9 +343,24 @@ class GenerationJobs:
             for chunk in chunks:
                 path = self.layout.job_chunk_text(book_id, job_id, chunk.id)
                 chunk_hash = self.store.write_text(path, chunk.text)
-                records.append(
-                    (chunk, path.relative_to(self.layout.root).as_posix(), chunk_hash)
+                synthesis_path = self.layout.job_chunk_synthesis_text(
+                    book_id, job_id, chunk.id
                 )
+                synthesis_text = enhancer.enhance_chunk(chunk)
+                if not synthesis_text.strip():
+                    continue
+                synthesis_hash = self.store.write_text(synthesis_path, synthesis_text)
+                records.append(
+                    (
+                        chunk,
+                        path.relative_to(self.layout.root).as_posix(),
+                        chunk_hash,
+                        synthesis_path.relative_to(self.layout.root).as_posix(),
+                        synthesis_hash,
+                    )
+                )
+            if not records:
+                raise ValueError("Narration plan has no speakable text")
             self.generation.create_job(
                 job_id=job_id,
                 book_id=book_id,
@@ -350,6 +368,7 @@ class GenerationJobs:
                 voice_profile_id=narrator_profile_id,
                 provider_id=voice["provider_id"],
                 connection_configuration_snapshot=connection_configuration,
+                narration_enhancement_snapshot=enhancement_settings.as_dict(),
                 profile_snapshot=profile,
                 profile_snapshot_sha256=profile_hash,
                 chunks=records,
@@ -417,6 +436,7 @@ class GenerationJobs:
             text = text_path.read_text(encoding="utf-8").rstrip("\n")
             if text_sha256(text) != chunk.text_sha256:
                 raise RuntimeError(f"Synthesis text failed hash validation: {chunk.id}")
+            text = self._synthesis_text(chunk, text)
             destination = self.layout.job_chunk_master(job["book_id"], job_id, chunk.id)
             provider_output = self.layout.job_chunk_temporary(
                 job_id, chunk.id, uuid.uuid4().hex
@@ -521,6 +541,7 @@ class GenerationJobs:
             text = text_path.read_text(encoding="utf-8").rstrip("\n")
             if text_sha256(text) != chunk.text_sha256:
                 raise RuntimeError(f"Synthesis text failed hash validation: {chunk.id}")
+            text = self._synthesis_text(chunk, text)
             result = self.provider_factory(job).synthesize(
                 SynthesisRequest(
                     text=text,
@@ -562,6 +583,18 @@ class GenerationJobs:
             provider_output.unlink(missing_ok=True)
             if not committed:
                 destination.unlink(missing_ok=True)
+
+    def _synthesis_text(self, chunk: StoredChunk, original_text: str) -> str:
+        if not chunk.synthesis_text_artifact_path:
+            return original_text
+        path = self._artifact_path(chunk.synthesis_text_artifact_path)
+        text = path.read_text(encoding="utf-8").rstrip("\n")
+        if (
+            not chunk.synthesis_text_sha256
+            or text_sha256(text) != chunk.synthesis_text_sha256
+        ):
+            raise RuntimeError(f"Enhanced synthesis text failed hash validation: {chunk.id}")
+        return text
 
     def _invalidate_outputs(self, job_id: str, chapter_index: int) -> None:
         for relative_path in self.generation.invalidate_job_outputs(

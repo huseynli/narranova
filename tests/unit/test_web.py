@@ -245,6 +245,47 @@ class WebAppTests(unittest.TestCase):
             self.assertTrue(chunks)
             self.assertEqual({chunk.chapter_index for chunk in chunks}, {2})
 
+    def test_book_narration_enhancement_settings_are_editable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "book.epub"
+            make_epub(source)
+            app = create_web_app(root / "data")
+            imported = app.import_book.execute(source)
+            _, headers, page = request(app, f"/books/{imported.book_id}")
+            cookie = next(value for name, value in headers if name == "Set-Cookie")
+            token = cookie.split(";", 1)[0].split("=", 1)[1]
+
+            self.assertIn(b"Narration enhancement", page)
+            self.assertIn(b'value="1.8"', page)
+            status, response_headers, _ = request(
+                app,
+                f"/books/{imported.book_id}/enhancement",
+                method="POST",
+                body=urlencode(
+                    {
+                        "csrf": token,
+                        "enabled": "on",
+                        "chapter_pause_seconds": "2.0",
+                        "section_pause_seconds": "1.1",
+                        "scene_break_pause_seconds": "1.6",
+                        "normalize_text": "on",
+                        "pronunciation_enabled": "on",
+                        "pronunciations": "Mara = /ˈmɑːrə/",
+                    }
+                ).encode(),
+                cookie=cookie,
+            )
+
+            self.assertEqual(status, "303 See Other")
+            self.assertIn(
+                "Narration+enhancement+saved",
+                next(value for name, value in response_headers if name == "Location"),
+            )
+            saved = app.books.get_enhancement_settings(imported.book_id)
+            self.assertEqual(saved.chapter_pause_seconds, 2.0)
+            self.assertEqual(saved.pronunciations[0].ipa, "ˈmɑːrə")
+
     def test_book_deletion_requires_confirmation_and_removes_the_book(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

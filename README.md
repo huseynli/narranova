@@ -148,3 +148,10 @@ Saving section choices creates an immutable plan revision; existing jobs retain
 their original plan and new jobs use the latest revision. The server binds to
 loopback by default; use `--host` deliberately when exposing it to a trusted
 network.
+
+Each book also has deterministic Narration Enhancement settings. New jobs can
+add configurable chapter, section-heading, and scene-break pauses using native
+OpenMOSS `[pause X.Ys]` controls, normalize common TTS typography, and apply a
+book-specific `term = IPA` pronunciation dictionary. Narranova stores the
+unchanged chunk text and a separate, hashed provider-input snapshot, so editing
+book settings never changes an existing job or the author's extracted prose.

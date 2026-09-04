@@ -119,6 +119,24 @@ class EpubParserTests(unittest.TestCase):
         self.assertEqual(parsed.cover_path, "EPUB/cover.jpg")
         self.assertEqual(parsed.cover_data, b"fake-jpeg")
 
+    def test_marks_headings_and_scene_breaks_without_rewriting_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "structure.epub"
+            make_epub(
+                path,
+                first_document="""<html><body><h1>Chapter One</h1><p>Opening.</p>
+                <h2>A turn</h2><p>* * *</p><p>Closing.</p><hr/><p>After.</p></body></html>""",
+            )
+            parsed = EpubParser().parse(path)
+
+        elements = parsed.documents[0].elements
+        self.assertEqual(
+            [item.kind for item in elements],
+            ["chapter_heading", "paragraph", "section_heading", "scene_break", "paragraph", "scene_break", "paragraph"],
+        )
+        self.assertEqual(elements[3].display_text, "* * *")
+        self.assertEqual(elements[5].display_text, "")
+
     def test_rejects_archive_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "unsafe.epub"

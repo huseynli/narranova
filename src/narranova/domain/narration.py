@@ -4,10 +4,32 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from narranova.domain.books import ParsedBook
+from narranova.domain.enhancement import is_scene_break
+
+
+_UNIT_KINDS = {"paragraph", "chapter_heading", "section_heading", "scene_break"}
+
+
+def _legacy_unit_kind(unit: dict[str, Any], first_units: set[str]) -> str:
+    """Conservatively recover structure from plans created before kind metadata."""
+    if str(unit["id"]) in first_units:
+        return "chapter_heading"
+    text = str(unit.get("display_text", "")).strip()
+    if is_scene_break(text):
+        return "scene_break"
+    if (
+        text
+        and len(text) <= 120
+        and len(text.split()) <= 12
+        and not re.search(r"[.!?…][\"']?$", text)
+    ):
+        return "section_heading"
+    return "paragraph"
 
 
 def text_sha256(value: str) -> str:
@@ -25,6 +47,7 @@ class NarrationUnit:
     enabled: bool
     display_text_sha256: str
     spoken_text_sha256: str
+    kind: str = "paragraph"
 
 
 @dataclass(frozen=True)
@@ -57,20 +80,28 @@ class NarrationPlan:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "NarrationPlan":
+        chapters = tuple(
+            NarrationChapter(
+                spine_index=int(chapter["spine_index"]),
+                document=str(chapter["document"]),
+                title=str(chapter["title"]),
+                unit_ids=tuple(chapter["unit_ids"]),
+            )
+            for chapter in data["chapters"]
+        )
+        first_units = {chapter.unit_ids[0] for chapter in chapters if chapter.unit_ids}
+        units = []
+        for raw_unit in data["units"]:
+            values = dict(raw_unit)
+            if "kind" not in values:
+                values["kind"] = _legacy_unit_kind(values, first_units)
+            units.append(NarrationUnit(**values))
         plan = cls(
             schema_version=int(data["schema_version"]),
             revision=int(data["revision"]),
             metadata=dict(data["metadata"]),
-            chapters=tuple(
-                NarrationChapter(
-                    spine_index=int(chapter["spine_index"]),
-                    document=str(chapter["document"]),
-                    title=str(chapter["title"]),
-                    unit_ids=tuple(chapter["unit_ids"]),
-                )
-                for chapter in data["chapters"]
-            ),
-            units=tuple(NarrationUnit(**unit) for unit in data["units"]),
+            chapters=chapters,
+            units=tuple(units),
         )
         if plan.schema_version != 1:
             raise ValueError(f"Unsupported narration plan schema: {plan.schema_version}")
@@ -99,7 +130,11 @@ class NarrationPlan:
         if set(referenced) != known_ids:
             raise ValueError("Every narration unit must be referenced by exactly one chapter")
         for unit in self.units:
-            if not unit.display_text.strip() or not unit.spoken_text.strip():
+            if unit.kind not in _UNIT_KINDS:
+                raise ValueError(f"Narration unit {unit.id} has an invalid kind")
+            if unit.kind != "scene_break" and (
+                not unit.display_text.strip() or not unit.spoken_text.strip()
+            ):
                 raise ValueError(f"Narration unit {unit.id} contains empty text")
             if text_sha256(unit.display_text) != unit.display_text_sha256:
                 raise ValueError(f"Narration unit {unit.id} display hash is invalid")
@@ -125,6 +160,7 @@ def plan_book(book: ParsedBook, revision: int = 1) -> NarrationPlan:
                 enabled=True,
                 display_text_sha256=text_sha256(element.display_text),
                 spoken_text_sha256=text_sha256(spoken_text),
+                kind=element.kind,
             )
             units.append(unit)
             chapter_unit_ids.append(unit_id)

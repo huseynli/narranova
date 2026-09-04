@@ -124,8 +124,13 @@ Major components:
 
 - `EpubParser`: validates the upload and reads OPF metadata, manifest, spine,
   navigation, cover, XHTML, and readable elements.
-- `NarrationPlanner`: cleans text, marks optional content, creates stable
-  narration units, and packs those units into provider-appropriate chunks.
+- `NarrationPlanner`: preserves extracted text, marks optional content, creates
+  stable narration units, and packs those units into provider-appropriate chunks.
+- `NarrationEnhancer`: deterministically derives provider-facing text from those
+  immutable chunks. It normalizes TTS typography, applies each book's optional
+  IPA dictionary, and maps chapter headings, section headings, and scene breaks
+  to supported OpenMOSS `[pause X.Ys]` controls. Settings and derived input are
+  snapshotted per job; this layer never rewrites the stored source or plan text.
 - `TTSProvider`: common provider interface and capability discovery.
 - `VoiceStudio`: excerpt selection, preview generation, take comparison, and
   saved voice profiles.
@@ -160,6 +165,7 @@ narranova/
       config.py
       domain/
         books.py
+        enhancement.py
         narration.py
         voices.py
         jobs.py

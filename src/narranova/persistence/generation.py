@@ -23,6 +23,8 @@ class StoredChunk:
     attempts: int
     text_sha256: str
     text_artifact_path: str
+    synthesis_text_artifact_path: str | None
+    synthesis_text_sha256: str | None
     audio_artifact_path: str | None
     audio_sha256: str | None
     duration_seconds: float | None
@@ -241,7 +243,9 @@ class GenerationRepository:
                 SELECT id AS database_id, logical_id AS id,
                        chapter_index, chunk_index, unit_ids_json,
                        status, attempts,
-                       text_sha256, text_artifact_path, audio_artifact_path,
+                       text_sha256, text_artifact_path,
+                       synthesis_text_artifact_path, synthesis_text_sha256,
+                       audio_artifact_path,
                        audio_sha256, duration_seconds
                 FROM chunks WHERE job_id = ? AND id = ?
                 """,
@@ -368,9 +372,10 @@ class GenerationRepository:
         voice_profile_id: str | None,
         provider_id: str,
         connection_configuration_snapshot: dict[str, Any],
+        narration_enhancement_snapshot: dict[str, Any],
         profile_snapshot: dict[str, Any],
         profile_snapshot_sha256: str,
-        chunks: list[tuple[SynthesisChunk, str, str]],
+        chunks: list[tuple[SynthesisChunk, str, str, str, str]],
     ) -> None:
         with self.database.connect() as connection:
             connection.execute(
@@ -379,10 +384,11 @@ class GenerationRepository:
                     id, book_id, narration_plan_id, narrator_profile_id,
                     provider_instance_id,
                     connection_configuration_snapshot_json,
+                    narration_enhancement_snapshot_json,
                     voice_profile_snapshot_json, voice_profile_snapshot_sha256,
                     status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ready')
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready')
                 """,
                 (
                     job_id,
@@ -395,6 +401,11 @@ class GenerationRepository:
                         ensure_ascii=False,
                         sort_keys=True,
                     ),
+                    json.dumps(
+                        narration_enhancement_snapshot,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
                     json.dumps(profile_snapshot, ensure_ascii=False, sort_keys=True),
                     profile_snapshot_sha256,
                 ),
@@ -404,7 +415,8 @@ class GenerationRepository:
                 INSERT INTO chunks(
                     id, job_id, chapter_index, chunk_index, text_sha256,
                     status, text_artifact_path, unit_ids_json, logical_id
-                ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                    , synthesis_text_artifact_path, synthesis_text_sha256
+                ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -416,8 +428,11 @@ class GenerationRepository:
                         text_path,
                         json.dumps(chunk.unit_ids),
                         chunk.id,
+                        synthesis_text_path,
+                        synthesis_text_hash,
                     )
-                    for chunk, text_path, text_hash in chunks
+                    for chunk, text_path, text_hash, synthesis_text_path,
+                    synthesis_text_hash in chunks
                 ],
             )
             connection.execute(
@@ -461,6 +476,8 @@ class GenerationRepository:
         result["provider_configuration"] = json.loads(
             result.pop("connection_configuration_json")
         )
+        enhancement = result.get("narration_enhancement_snapshot_json")
+        result["narration_enhancement"] = json.loads(enhancement) if enhancement else None
         return result
 
     def list_job_voice_snapshots(self) -> list[dict[str, Any]]:
@@ -517,6 +534,7 @@ class GenerationRepository:
                        chapter_index, chunk_index, unit_ids_json,
                        status, attempts,
                        text_sha256, text_artifact_path,
+                       synthesis_text_artifact_path, synthesis_text_sha256,
                        audio_artifact_path, audio_sha256, duration_seconds
                 FROM chunks WHERE job_id = ?
                 ORDER BY chapter_index, chunk_index

@@ -23,6 +23,7 @@ class NarrationFragment:
     document: str
     element_id: str
     text: str
+    kind: str = "paragraph"
 
 
 @dataclass(frozen=True)
@@ -88,7 +89,7 @@ class ChunkPlanner:
 
     def _fragments(self, unit: NarrationUnit) -> tuple[NarrationFragment, ...]:
         return tuple(
-            NarrationFragment(unit.id, unit.document, unit.element_id, text)
+            NarrationFragment(unit.id, unit.document, unit.element_id, text, unit.kind)
             for text in self._split_text(unit.spoken_text)
         )
 

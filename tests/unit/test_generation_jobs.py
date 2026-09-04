@@ -16,6 +16,7 @@ from narranova.application.ingest import ImportBook
 from narranova.application.revise_plan import ReviseNarrationPlan
 from narranova.artifacts import ArtifactLayout, ArtifactStore
 from narranova.audio import AudioMasterInfo, validate_wave
+from narranova.domain.enhancement import NarrationEnhancementSettings, Pronunciation
 from narranova.epub import EpubParser
 from narranova.persistence import Database
 from narranova.persistence.benchmarks import BenchmarkRepository
@@ -175,6 +176,62 @@ class GenerationJobTests(unittest.TestCase):
         self.assertNotEqual(first, deterministic_chunk_seed("book-b", 1, 2))
         self.assertGreater(first, 0)
         self.assertLessEqual(first, 2_147_483_647)
+
+    def test_job_snapshots_enhanced_tts_text_without_changing_source_chunk(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            source = root / "book.epub"
+            reference = root / "reference.wav"
+            make_epub(source)
+            make_wave(reference)
+            layout = ArtifactLayout.at(data)
+            layout.initialize()
+            store = ArtifactStore(data)
+            database = Database(data / "narranova.sqlite3")
+            database.initialize()
+            books = BookRepository(database)
+            generation = GenerationRepository(database)
+            imported = ImportBook(EpubParser(), books, layout, store).execute(source)
+            books.save_enhancement_settings(
+                imported.book_id,
+                NarrationEnhancementSettings(
+                    chapter_pause_seconds=2.4,
+                    pronunciations=(Pronunciation("Two", "tuː"),),
+                ),
+            )
+            profiles = VoiceProfiles(generation, layout, store)
+            provider_id = profiles.add_openmoss_provider("MOSS", "http://moss.test:8000/tts")
+            profile_id = profiles.create_openmoss_profile(
+                provider_id=provider_id,
+                reference_audio=reference,
+                instruction="Read steadily.",
+                name="Narrator",
+            )
+            fake = FakeProvider()
+            jobs = GenerationJobs(
+                books,
+                generation,
+                layout,
+                store,
+                provider_factory=lambda job: fake,
+                masters=FakeAudioMasters(),
+            )
+
+            job_id = jobs.create(imported.book_id, profile_id)
+            first = generation.list_chunks(job_id)[0]
+            original = (data / first.text_artifact_path).read_text(encoding="utf-8")
+            derived = (data / str(first.synthesis_text_artifact_path)).read_text(encoding="utf-8")
+            books.save_enhancement_settings(
+                imported.book_id, NarrationEnhancementSettings(enabled=False)
+            )
+            jobs.run(job_id)
+
+            self.assertTrue(original.startswith("Two"))
+            self.assertNotIn("[pause", original)
+            self.assertTrue(derived.startswith("/tuː/\n[pause 2.4s]"))
+            self.assertEqual(fake.requests[0].text, derived)
+            self.assertTrue(generation.get_job(job_id)["narration_enhancement"]["enabled"])
 
     def test_stop_after_chapter_finishes_current_chapter_then_pauses(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -85,6 +85,10 @@ class ArtifactLayout:
         safe_chunk_id = _validate_id(chunk_id, "chunk id")
         return self.job_root(book_id, job_id) / "chunks" / f"{safe_chunk_id}.txt"
 
+    def job_chunk_synthesis_text(self, book_id: str, job_id: str, chunk_id: str) -> Path:
+        safe_chunk_id = _validate_id(chunk_id, "chunk id")
+        return self.job_root(book_id, job_id) / "chunks" / f"{safe_chunk_id}.tts.txt"
+
     def job_chunk_master(self, book_id: str, job_id: str, chunk_id: str) -> Path:
         safe_chunk_id = _validate_id(chunk_id, "chunk id")
         return self.job_root(book_id, job_id) / "chunks" / f"{safe_chunk_id}.flac"

@@ -17,6 +17,7 @@ from narranova.domain.books import (
     SourceElement,
 )
 from narranova.epub.safety import UnsafeEpubError, validate_archive, validate_xml
+from narranova.domain.enhancement import is_scene_break
 
 
 class EpubError(ValueError):
@@ -198,8 +199,16 @@ def _inline_text(element: ET.Element) -> str:
 def _readable_elements(root: ET.Element, spine_index: int, document: str) -> tuple[SourceElement, ...]:
     found: list[SourceElement] = []
 
-    def add(text: str, element: ET.Element, suffix: int = 0) -> None:
-        if not text:
+    seen_heading = False
+
+    def add(
+        text: str,
+        element: ET.Element,
+        suffix: int = 0,
+        kind: str = "paragraph",
+    ) -> None:
+        nonlocal seen_heading
+        if not text and kind != "scene_break":
             return
         position = len(found) + 1
         source_id = element.attrib.get("id")
@@ -215,8 +224,11 @@ def _readable_elements(root: ET.Element, spine_index: int, document: str) -> tup
                 document=document,
                 element_id=element_id,
                 display_text=text,
+                kind=kind,
             )
         )
+        if kind in {"chapter_heading", "section_heading"}:
+            seen_heading = True
 
     def walk_container(element: ET.Element) -> None:
         if _local_name(element.tag) in _SKIP_TAGS:
@@ -240,7 +252,17 @@ def _readable_elements(root: ET.Element, spine_index: int, document: str) -> tup
                 pass
             elif tag in _BLOCK_TAGS:
                 flush()
-                add(_inline_text(child), child)
+                text = _inline_text(child)
+                if tag.startswith("h") and len(tag) == 2 and tag[1].isdigit():
+                    kind = "section_heading" if seen_heading else "chapter_heading"
+                elif is_scene_break(text):
+                    kind = "scene_break"
+                else:
+                    kind = "paragraph"
+                add(text, child, kind=kind)
+            elif tag == "hr":
+                flush()
+                add("", child, kind="scene_break")
             elif any(_local_name(desc.tag) in _BLOCK_TAGS for desc in child.iter() if desc is not child):
                 flush()
                 walk_container(child)

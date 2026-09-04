@@ -24,6 +24,7 @@ class SourceElement:
     document: str
     element_id: str
     display_text: str
+    kind: str = "paragraph"
 
 
 @dataclass(frozen=True)

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
 from narranova.persistence.database import Database
+from narranova.domain.enhancement import NarrationEnhancementSettings
 
 
 @dataclass(frozen=True)
@@ -124,3 +126,30 @@ class BookRepository:
             cursor = connection.execute("DELETE FROM books WHERE id = ?", (book_id,))
         if cursor.rowcount != 1:
             raise KeyError(f"Book not found: {book_id}")
+
+    def get_enhancement_settings(self, book_id: str) -> NarrationEnhancementSettings:
+        self.get_book(book_id)
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT settings_json FROM book_narration_enhancement WHERE book_id = ?",
+                (book_id,),
+            ).fetchone()
+        if row is None:
+            return NarrationEnhancementSettings()
+        return NarrationEnhancementSettings.from_dict(json.loads(row[0]))
+
+    def save_enhancement_settings(
+        self, book_id: str, settings: NarrationEnhancementSettings
+    ) -> None:
+        self.get_book(book_id)
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO book_narration_enhancement(book_id, settings_json)
+                VALUES (?, ?)
+                ON CONFLICT(book_id) DO UPDATE SET
+                    settings_json = excluded.settings_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (book_id, json.dumps(settings.as_dict(), ensure_ascii=False, sort_keys=True)),
+            )

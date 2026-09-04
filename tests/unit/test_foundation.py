@@ -187,12 +187,14 @@ class DatabaseTests(unittest.TestCase):
                     (9, "chapter_pause"),
                     (10, "work_leases"),
                     (11, "chunk_attempts"),
+                    (12, "narration_enhancement"),
                 ],
             )
             self.assertTrue(
                 {
                     "books",
                     "jobs",
+                    "book_narration_enhancement",
                     "chunks",
                     "artifacts",
                     "narrator_profiles",
