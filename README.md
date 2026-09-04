@@ -109,8 +109,8 @@ Narranova requires:
 Create a virtual environment and install Narranova from the repository:
 
 ```console
-git clone https://github.com/huseynli/NarraNova.git
-cd NarraNova
+git clone https://github.com/huseynli/narranova.git
+cd narranova
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install .
