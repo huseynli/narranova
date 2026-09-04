@@ -164,6 +164,7 @@ class DatabaseTests(unittest.TestCase):
                     (5, "output_artifacts"),
                     (6, "job_storage"),
                     (8, "connection_performance"),
+                    (9, "chapter_pause"),
                 ],
             )
             self.assertTrue(

@@ -114,7 +114,7 @@ PYTHONPATH=src python -m narranova web --data-dir ./data
 
 Open `http://127.0.0.1:8787`. The web interface supports EPUB upload, library
 and narration-plan review, per-section narration inclusion, a dedicated TTS
-connections page, nine packaged OpenMOSS narrator pairs, and a book-independent
+connections page, two packaged OpenMOSS narrator pairs, and a book-independent
 Voice Lab for comparing short custom auditions. The built-in pairs include their
 exact instruction, reference text, and WAV; users can preview them in the voice
 library and select one directly when creating a narration job. Voice Lab first
@@ -132,7 +132,8 @@ protected from deletion until those jobs complete or are deleted; deleting the
 profile afterward removes its own files without breaking completed jobs. Saving a
 profile removes its discarded draft audio. The interface also supports durable job creation,
 background generation, pause/resume, status, verified FLAC chunk playback,
-selective chunk regeneration, direct M4B assembly, storage finalization, and
+pause-after-chapter, selective chunk regeneration, direct M4B assembly,
+storage finalization, and
 final artifact downloads.
 VoiceLab's collapsed advanced section exposes optional OpenMOSS sampling controls
 and manual candidate seeds. Audiobook chunks use deterministic per-chunk seeds so

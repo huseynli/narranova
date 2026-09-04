@@ -23,7 +23,7 @@ from narranova.providers import (
 )
 
 
-BENCHMARK_VOICE_PAIR_ID = "builtin:01"
+BENCHMARK_VOICE_PAIR_ID = "builtin:04"
 BENCHMARK_SEED = 1_904_117
 BENCHMARK_TEXT = (
     "At first light, the station clock struck six, and the narrow streets began "
@@ -212,6 +212,16 @@ class ConnectionBenchmarks:
             benchmark_id=run.id,
         )
         return selected
+
+    def delete(self, provider_id: str, benchmark_id: str) -> None:
+        run = self.repository.get_run(benchmark_id)
+        if run.provider_id != provider_id:
+            raise KeyError("Connection benchmark not found")
+        self.repository.delete_run(benchmark_id)
+        shutil.rmtree(
+            self.layout.connection_benchmark_root(provider_id, benchmark_id),
+            ignore_errors=True,
+        )
 
     def verified_sample(self, benchmark_id: str, frames: int) -> Path:
         run = self.repository.get_run(benchmark_id)

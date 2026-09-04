@@ -64,13 +64,18 @@ class VoiceStudioTests(unittest.TestCase):
                 name="Warm literary",
                 provider_id=provider_id,
                 reference_choice=f"take:{second_take}",
-                instruction="A warmer literary narrator with measured pacing.",
-                language="English",
+                instruction="This untested replacement must be ignored.",
+                language="French",
             )
 
             saved = generation.get_voice_and_provider(profile_id)
             saved_path = data / saved["profile"]["reference_artifact_path"]
             self.assertEqual(saved["profile"]["name"], "Warm literary")
+            self.assertEqual(
+                saved["profile"]["instruction"],
+                "A warmer literary narrator with measured pacing.",
+            )
+            self.assertEqual(saved["profile"]["language"], "English")
             self.assertEqual(
                 saved["profile"]["sampling"],
                 {"audio_temperature": 0.8, "seed": 123},
@@ -127,7 +132,61 @@ class VoiceStudioTests(unittest.TestCase):
             draft = studio.get(draft_id)
             self.assertTrue(draft["uploaded_reference_path"])
             self.assertTrue(layout.voice_studio_upload(draft_id).is_file())
+            uploaded_path, uploaded_hash = studio.uploaded_audio(draft_id)
+            self.assertEqual(uploaded_path, layout.voice_studio_upload(draft_id))
+            self.assertEqual(uploaded_hash, store.sha256(uploaded_path))
             self.assertEqual(draft["takes"], [])
+
+    def test_uploaded_pair_inherits_the_selected_test_instruction(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            reference = root / "reference.wav"
+            make_wave(reference, frames=480)
+            layout = ArtifactLayout.at(data)
+            layout.initialize()
+            store = ArtifactStore(data)
+            database = Database(data / "narranova.sqlite3")
+            database.initialize()
+            generation = GenerationRepository(database)
+            profiles = VoiceProfiles(generation, layout, store)
+            provider_id = profiles.add_openmoss_provider(
+                "Test MOSS", "http://moss.test:8000/tts"
+            )
+            studio = VoiceStudio(
+                generation,
+                profiles,
+                layout,
+                store,
+                provider_factory=lambda provider: FakeProvider(),
+            )
+            draft_id = studio.start()
+            take_id = studio.generate_take(
+                draft_id,
+                provider_id=provider_id,
+                reference_choice="uploaded",
+                instruction="Keep the uploaded voice calm and precise.",
+                sample_text=DEFAULT_SAMPLE_TEXT,
+                language="English",
+                uploaded_reference=reference,
+            )
+
+            profile_id = studio.save_profile(
+                draft_id,
+                name="Recorded narrator",
+                provider_id="",
+                reference_choice=f"uploaded:{take_id}",
+                instruction="This replacement was not tested.",
+                language="French",
+            )
+
+            saved = generation.get_voice_and_provider(profile_id)["profile"]
+            saved_path = data / saved["reference_artifact_path"]
+            self.assertEqual(
+                saved["instruction"], "Keep the uploaded voice calm and precise."
+            )
+            self.assertEqual(saved["language"], "English")
+            self.assertEqual(store.sha256(saved_path), store.sha256(reference))
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -24,6 +25,7 @@ def request(
     range_header: str = "",
 ):
     captured: dict[str, object] = {}
+    path_info, separator, query_string = path.partition("?")
 
     def start_response(status: str, headers: list[tuple[str, str]]) -> None:
         captured["status"] = status
@@ -31,8 +33,8 @@ def request(
 
     environ: dict[str, object] = {
         "REQUEST_METHOD": method,
-        "PATH_INFO": path,
-        "QUERY_STRING": "",
+        "PATH_INFO": path_info,
+        "QUERY_STRING": query_string if separator else "",
         "CONTENT_LENGTH": str(len(body)),
         "CONTENT_TYPE": content_type,
         "wsgi.input": io.BytesIO(body),
@@ -218,6 +220,13 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(status, "303 See Other")
             self.assertIn("revision+2", next(v for n, v in response_headers if n == "Location"))
             self.assertEqual(app.books.get_plan_record(imported.book_id)["revision"], 2)
+            provider_id = app.profiles.add_openmoss_provider(
+                "Plan MOSS", "http://moss.test:8000/tts"
+            )
+            job_id = app.jobs.create(imported.book_id, "builtin:04", provider_id)
+            chunks = app.generation.list_chunks(job_id)
+            self.assertTrue(chunks)
+            self.assertEqual({chunk.chapter_index for chunk in chunks}, {2})
 
     def test_book_deletion_requires_confirmation_and_removes_the_book(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -279,12 +288,36 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b'action="/connections"', connections)
             self.assertIn(b'name="kind"', connections)
             self.assertIn(f'/connections/{provider_id}/benchmark'.encode(), connections)
-            self.assertIn(f'/connections/{provider_id}/test'.encode(), connections)
+            self.assertNotIn(f'/connections/{provider_id}/test'.encode(), connections)
+            self.assertIn(f'data-health-url="/connections/{provider_id}/health"'.encode(), connections)
+
+            with patch(
+                "narranova.web.app.OpenMossProvider.health",
+                return_value={"architecture": "MOSS-Test"},
+            ):
+                status, health_headers, health = request(
+                    app, f"/connections/{provider_id}/health"
+                )
+            self.assertEqual(status, "200 OK")
+            self.assertIn(("Content-Type", "application/json; charset=utf-8"), health_headers)
+            self.assertEqual(
+                json.loads(health),
+                {"healthy": True, "model": "MOSS-Test", "error": ""},
+            )
+            with patch(
+                "narranova.web.app.OpenMossProvider.health",
+                side_effect=RuntimeError("MOSS is offline"),
+            ):
+                status, _, health = request(app, f"/connections/{provider_id}/health")
+            self.assertEqual(status, "200 OK")
+            self.assertEqual(json.loads(health)["healthy"], False)
+            self.assertIn("offline", json.loads(health)["error"])
 
             status, _, benchmark = request(
                 app, f"/connections/{provider_id}/benchmark"
             )
             self.assertEqual(status, "200 OK")
+            self.assertIn(f'/connections/{provider_id}/test'.encode(), benchmark)
             self.assertIn(b"Streaming decode batch", benchmark)
             self.assertIn(b"Run Auto-tune", benchmark)
             for frames in (16, 32, 64, 128, 256, 512):
@@ -301,7 +334,9 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"Choose a voice or build your own", voices)
             self.assertIn(b'class="page-heading full-page-heading"', voices)
             self.assertIn(b"Built-in narrator pairs", voices)
-            self.assertIn(b"01 female", voices)
+            self.assertIn(b"04 female", voices)
+            self.assertIn(b"09 male", voices)
+            self.assertNotIn(b"01 female", voices)
             self.assertIn(b"Created by you", voices)
             self.assertIn(b'<span class="count">01</span>', voices)
             self.assertLess(voices.index(b"Build a custom pair"), voices.index(b"Your profiles"))
@@ -309,7 +344,7 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b'class="panel start-studio"', voices)
             self.assertIn(b'class="start-studio-actions"', voices)
 
-            status, audio_headers, audio = request(app, "/default-voices/01/audio")
+            status, audio_headers, audio = request(app, "/default-voices/04/audio")
             self.assertEqual(status, "200 OK")
             self.assertIn(("Content-Type", "audio/wav"), audio_headers)
             self.assertGreater(len(audio), 1_000_000)
@@ -328,11 +363,17 @@ class WebAppTests(unittest.TestCase):
             status, _, studio = request(app, location)
             self.assertEqual(status, "200 OK")
             self.assertIn(b"Build a stable narrator", studio)
-            self.assertIn(b"Create the reference audio", studio)
-            self.assertIn(b"Pair and save the profile", studio)
-            self.assertIn(b"Warm literary", studio)
+            self.assertIn(b"Design a narrator", studio)
+            self.assertIn(b"Bring your own reference", studio)
+            self.assertIn(b'class="voice-lab-stack"', studio)
+            self.assertNotIn(b'class="studio-grid"', studio)
+            self.assertNotIn(b'class="panel lab-workflow" open', studio)
+            status, _, reopened = request(app, f"{location}?open=generated")
+            self.assertEqual(status, "200 OK")
+            self.assertEqual(reopened.count(b'class="panel lab-workflow" open'), 1)
+            self.assertIn(b"Natural contemporary fiction", studio)
             self.assertIn(b"The rain had stopped", studio)
-            self.assertIn(b"No source reference", studio)
+            self.assertIn(b'value="none"', studio)
             self.assertIn(b"Advanced quality &amp; sampling", studio)
             self.assertIn(b'name="text_temperature"', studio)
             self.assertIn(b'name="audio_repetition_penalty"', studio)
@@ -462,6 +503,28 @@ class WebAppTests(unittest.TestCase):
             )
             self.assertEqual(status, "200 OK")
             self.assertEqual(json.loads(state_body)["total"], 6)
+            app.benchmarks.repository.fail_run(run.id, "Stopped for deletion test")
+            status, _, benchmark_page = request(
+                app, f"/connections/{provider_id}/benchmark"
+            )
+            self.assertEqual(status, "200 OK")
+            delete_path = (
+                f"/connections/{provider_id}/benchmarks/{run.id}/delete"
+            )
+            self.assertIn(delete_path.encode(), benchmark_page)
+            status, _, confirmation = request(app, delete_path)
+            self.assertEqual(status, "200 OK")
+            self.assertIn(b"Delete benchmark run", confirmation)
+            status, _, _ = request(
+                app,
+                delete_path,
+                method="POST",
+                body=urlencode({"csrf": token}).encode(),
+                cookie=cookie,
+            )
+            self.assertEqual(status, "303 See Other")
+            with self.assertRaises(KeyError):
+                app.benchmarks.repository.get_run(run.id)
 
     def test_voice_profile_marks_unfinished_job_usage_until_completion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -486,12 +549,12 @@ class WebAppTests(unittest.TestCase):
             _, _, narration_page = request(
                 app, f"/books/{imported.book_id}/narrations/new"
             )
-            self.assertIn(b'value="builtin:01"', narration_page)
+            self.assertIn(b'value="builtin:04"', narration_page)
             self.assertIn(b"Listen to built-in pairs", narration_page)
             self.assertIn(b"Listen to custom pairs", narration_page)
             self.assertLess(
                 narration_page.index(b">Custom " + bytes((194, 183)) + b" Working voice</option>"),
-                narration_page.index(b">Built in " + bytes((194, 183)) + b" 01 female</option>"),
+                narration_page.index(b">Built in " + bytes((194, 183)) + b" 04 female</option>"),
             )
             self.assertLess(
                 narration_page.index(b"Listen to custom pairs"),
@@ -521,7 +584,7 @@ class WebAppTests(unittest.TestCase):
             provider_id = app.profiles.add_openmoss_provider(
                 "Job MOSS", "http://moss.test:8000/tts"
             )
-            job_id = app.jobs.create(imported.book_id, "builtin:01", provider_id)
+            job_id = app.jobs.create(imported.book_id, "builtin:04", provider_id)
             chunk = app.generation.list_chunks(job_id)[0]
             audio_path = app.layout.job_chunk_master(imported.book_id, job_id, chunk.id)
             make_wave(audio_path)
@@ -542,6 +605,8 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"Generation in progress", job_page)
             self.assertIn(b"data-job-start hidden", job_page)
             self.assertIn(b"data-job-pause", job_page)
+            self.assertIn(b"data-job-pause-chapter", job_page)
+            self.assertIn(b"Stop after chapter", job_page)
             self.assertIn(download_path.encode(), job_page)
             self.assertIn(b'class="chunk-action-links"', job_page)
             self.assertIn(
@@ -559,6 +624,7 @@ class WebAppTests(unittest.TestCase):
             state = json.loads(state_body)
             self.assertEqual(state["status"], "generating")
             self.assertFalse(state["regenerating"])
+            self.assertFalse(state["chapter_pause_requested"])
             self.assertEqual(state["completed"], 1)
             self.assertEqual(state["percent"], 50)
 
@@ -603,7 +669,7 @@ class WebAppTests(unittest.TestCase):
             provider_id = app.profiles.add_openmoss_provider(
                 "Job MOSS", "http://moss.test:8000/tts"
             )
-            job_id = app.jobs.create(imported.book_id, "builtin:01", provider_id)
+            job_id = app.jobs.create(imported.book_id, "builtin:04", provider_id)
             for chunk in app.generation.list_chunks(job_id):
                 audio_path = app.layout.job_chunk_master(
                     imported.book_id, job_id, chunk.id

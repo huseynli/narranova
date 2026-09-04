@@ -24,8 +24,17 @@
 .units { padding: 0 22px 18px 69px; }
 .units p { margin: 0; padding: 12px 0; border-top: 1px solid var(--unit-line); line-height: 1.55; }
 .units p span { display: block; margin-bottom: 4px; color: var(--choice-id); font: 9px ui-monospace, monospace; }
-.chapter-choice { display: flex; align-items: center; justify-content: flex-end; gap: 7px; cursor: pointer; }
-.chapter-choice input { position: absolute; opacity: 0; pointer-events: none; }
+.chapter-choice { position: relative; display: flex; align-items: center; justify-content: flex-end; gap: 7px; cursor: pointer; }
+.chapter-choice input {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
 .chapter-choice i {
   position: relative;
   width: 34px;

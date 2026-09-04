@@ -17,14 +17,14 @@ from tests.unit.test_generation_jobs import FakeAudioMasters, FakeProvider
 
 
 class DefaultVoiceTests(unittest.TestCase):
-    def test_catalog_contains_nine_valid_exact_pairs(self) -> None:
+    def test_catalog_contains_two_valid_exact_pairs(self) -> None:
         pairs = default_voice_pairs()
 
-        self.assertEqual(len(pairs), 9)
-        self.assertEqual([pair.id for pair in pairs], [f"{index:02d}" for index in range(1, 10)])
+        self.assertEqual(len(pairs), 2)
+        self.assertEqual([pair.id for pair in pairs], ["04", "09"])
         self.assertTrue(all(pair.audio_path.is_file() for pair in pairs))
         self.assertTrue(all(len(pair.audio_sha256) == 64 for pair in pairs))
-        self.assertIn("warm audiobook narrator", default_voice_pair("builtin:01").instruction)
+        self.assertIn("mature audiobook narrator", default_voice_pair("builtin:04").instruction)
 
     def test_builtin_pair_creates_a_self_contained_job_without_saved_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -54,13 +54,13 @@ class DefaultVoiceTests(unittest.TestCase):
                 masters=FakeAudioMasters(),
             )
 
-            job_id = jobs.create(imported.book_id, "builtin:01", provider_id)
+            job_id = jobs.create(imported.book_id, "builtin:04", provider_id)
             job = generation.get_job(job_id)
             reference = data / job["profile"]["reference_artifact_path"]
 
             self.assertIsNone(job["narrator_profile_id"])
-            self.assertEqual(job["profile"]["builtin_voice_id"], "01")
-            self.assertEqual(job["profile"]["instruction"], default_voice_pair("builtin:01").instruction)
+            self.assertEqual(job["profile"]["builtin_voice_id"], "04")
+            self.assertEqual(job["profile"]["instruction"], default_voice_pair("builtin:04").instruction)
             self.assertTrue(reference.is_file())
             self.assertTrue(reference.is_relative_to(layout.job_root(imported.book_id, job_id)))
 

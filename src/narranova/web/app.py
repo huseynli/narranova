@@ -243,6 +243,13 @@ class NarranovaWebApp:
             parts = [part for part in path.split("/") if part]
             if method == "GET" and parts == ["connections"]:
                 return self._html(start_response, self._connections(environ, csrf), set_cookie)
+            if (
+                method == "GET"
+                and len(parts) == 3
+                and parts[0] == "connections"
+                and parts[2] == "health"
+            ):
+                return self._connection_health(start_response, parts[1])
             if method == "GET" and parts == ["voices"]:
                 return self._html(start_response, self._voices(environ, csrf), set_cookie)
             if method == "GET" and parts == ["jobs"]:
@@ -279,6 +286,30 @@ class NarranovaWebApp:
                 and parts[4] == "status"
             ):
                 return self._benchmark_state(start_response, parts[1], parts[3])
+            if (
+                method == "GET"
+                and len(parts) == 5
+                and parts[0] == "connections"
+                and parts[2] == "benchmarks"
+                and parts[4] == "delete"
+            ):
+                run = self.benchmarks.repository.get_run(parts[3])
+                if run.provider_id != parts[1]:
+                    raise KeyError("Connection benchmark not found")
+                return self._html(
+                    start_response,
+                    self._confirm(
+                        environ,
+                        csrf,
+                        title="Delete benchmark run",
+                        subject=f"{'Auto-tune' if run.mode == 'auto' else 'Single batch'} · {run.created_at}",
+                        warning="This permanently deletes the measurements and generated benchmark audio samples.",
+                        action=f"/connections/{self._e(parts[1])}/benchmarks/{self._e(parts[3])}/delete",
+                        cancel=f"/connections/{self._e(parts[1])}/benchmark",
+                        button="Delete benchmark",
+                    ),
+                    set_cookie,
+                )
             if (
                 method == "GET"
                 and len(parts) == 7
@@ -346,6 +377,13 @@ class NarranovaWebApp:
                 and parts[5] == "audio"
             ):
                 return self._studio_audio(start_response, parts[2], parts[4])
+            if (
+                method == "GET"
+                and len(parts) == 5
+                and parts[:2] == ["voices", "drafts"]
+                and parts[3:] == ["reference", "audio"]
+            ):
+                return self._studio_uploaded_audio(start_response, parts[2])
             if (
                 method == "GET"
                 and len(parts) == 4
@@ -565,6 +603,17 @@ class NarranovaWebApp:
                 f"/connections/{parts[1]}/benchmark?notice="
                 f"Streaming+decode+batch+set+to+{frames}",
             )
+        if (
+            len(parts) == 5
+            and parts[0] == "connections"
+            and parts[2] == "benchmarks"
+            and parts[4] == "delete"
+        ):
+            self.benchmarks.delete(parts[1], parts[3])
+            return self._redirect(
+                start_response,
+                f"/connections/{parts[1]}/benchmark?notice=Benchmark+deleted",
+            )
         if len(parts) == 3 and parts[0] == "connections" and parts[2] == "delete":
             self.deletion.connection(parts[1])
             return self._redirect(start_response, "/connections?notice=Connection+deleted")
@@ -584,9 +633,14 @@ class NarranovaWebApp:
                 uploaded_reference=upload.path if upload else None,
                 sampling=openmoss_sampling_from_form(fields),
             )
+            workflow = (
+                "uploaded"
+                if fields.get("reference_choice") == "uploaded"
+                else "generated"
+            )
             return self._redirect(
                 start_response,
-                f"/voices/drafts/{parts[2]}?notice=New+audition+ready",
+                f"/voices/drafts/{parts[2]}?notice=New+audition+ready&open={workflow}",
             )
         if len(parts) == 4 and parts[:2] == ["voices", "drafts"] and parts[3] == "save":
             profile_id = self.voice_studio.save_profile(
@@ -646,6 +700,12 @@ class NarranovaWebApp:
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "pause":
             self.generation.request_pause(parts[1])
             return self._redirect(start_response, f"/jobs/{parts[1]}?notice=Pause+requested")
+        if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "pause-chapter":
+            self.generation.request_pause_after_chapter(parts[1])
+            return self._redirect(
+                start_response,
+                f"/jobs/{parts[1]}?notice=Stop+after+chapter+requested",
+            )
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "assemble":
             started = self.supervisor.assemble(parts[1])
             notice = "Audiobook+build+started" if started else "Job+is+already+busy"
@@ -729,11 +789,11 @@ class NarranovaWebApp:
                 performance_copy = (
                     f"Streaming decode batch {performance.stream_chunk_frames}"
                 )
-                performance_actions = f"""<form method="post" action="/connections/{self._e(provider.id)}/test">{self._csrf(csrf)}<button class="link-button">Test</button></form><a href="/connections/{self._e(provider.id)}/benchmark">Benchmark</a>"""
+                performance_actions = f"""<a href="/connections/{self._e(provider.id)}/benchmark">Benchmark</a>"""
             else:
                 performance_copy = provider_type(provider.kind).description
                 performance_actions = ""
-            return f"""<article class="connection-card"><div class="connection-icon">{self._e(provider_type(provider.kind).label[:1])}</div><div><span class="status status-completed">Configured</span><h3>{self._e(provider.name)}</h3><p>{self._e(provider.endpoint_url)}</p><small>{self._e(provider_type(provider.kind).label)} · {self._e(performance_copy)}</small><div class="card-actions">{performance_actions}<a href="/connections/{self._e(provider.id)}/edit">Edit</a><a class="danger-link" href="/connections/{self._e(provider.id)}/delete">Delete</a></div></div></article>"""
+            return f"""<article class="connection-card"><div class="connection-icon">{self._e(provider_type(provider.kind).label[:1])}</div><div><span class="connection-health checking" data-connection-health data-health-url="/connections/{self._e(provider.id)}/health"><i></i><b>Checking connection</b></span><h3>{self._e(provider.name)}</h3><p>{self._e(provider.endpoint_url)}</p><small>{self._e(provider_type(provider.kind).label)} · {self._e(performance_copy)}</small><div class="card-actions">{performance_actions}<a href="/connections/{self._e(provider.id)}/edit">Edit</a><a class="danger-link" href="/connections/{self._e(provider.id)}/delete">Delete</a></div></div></article>"""
 
         cards = "".join(
             connection_card(provider)
@@ -819,7 +879,7 @@ class NarranovaWebApp:
         ) or '<div class="empty-state compact"><span>↗</span><h3>No benchmark results yet</h3><p>Run one batch or Auto-tune all six supported values.</p></div>'
         body = f"""<a class="back" href="/connections">← TTS connections</a><section class="page-heading full-page-heading"><div><p class="eyebrow">Connection performance</p><h1>{self._e(provider['name'])}</h1><p>Measure this OpenMOSS server with controlled, book-independent narration.</p></div><div class="heading-actions"><form method="post" action="/connections/{self._e(provider_id)}/test">{self._csrf(csrf)}<button>Test connection</button></form><a class="button" href="/connections/{self._e(provider_id)}/edit">Edit connection</a></div></section>
         <section class="benchmark-summary-strip"><div><span>Endpoint</span><strong>{self._e(provider['endpoint_url'])}</strong></div><div><span>Current streaming decode batch</span><strong>{performance.stream_chunk_frames} frames · ~{performance.stream_chunk_frames * 0.08:.2f}s audio</strong></div><div><span>Sampling</span><strong>Engine default</strong></div></section>{monitor}
-        <div class="benchmark-layout"><main class="stack"><section class="panel benchmark-builder"><header><div><p class="eyebrow">Performance test</p><h2>Streaming decode batch</h2><p>Larger batches reduce codec overhead and usually improve offline generation throughput. Smaller batches return audio sooner.</p></div></header><div class="benchmark-actions"><form method="post" action="/connections/{self._e(provider_id)}/benchmarks">{self._csrf(csrf)}<input type="hidden" name="mode" value="single"><label>Test one batch<select name="stream_chunk_frames">{options}</select></label><button class="primary"{disabled}>Run benchmark</button></form><form class="auto-tune" method="post" action="/connections/{self._e(provider_id)}/benchmarks">{self._csrf(csrf)}<input type="hidden" name="mode" value="auto"><div><strong>Auto-tune all six values</strong><p>Tests 16 → 32 → 64 → 128 → 256 → 512, then recommends the smallest batch within 3% of the fastest result.</p></div><button{disabled}>Run Auto-tune</button></form></div><div class="controlled-inputs"><span>Controlled inputs</span><p>Fixed original passage · Built-in narrator 01 · fixed instruction · fixed seed · engine-default sampling · safe automatic output ceiling</p></div></section><section class="benchmark-history"><div class="section-heading"><div><p class="eyebrow">Measurements</p><h2>Recent benchmark runs</h2><p>Listen to samples and apply a measured batch to future jobs.</p></div><span class="count">{len([run for run in runs if run.status != 'running']):02d}</span></div>{history}</section></main>
+        <div class="benchmark-layout"><main class="stack"><section class="panel benchmark-builder"><header><div><p class="eyebrow">Performance test</p><h2>Streaming decode batch</h2><p>Larger batches reduce codec overhead and usually improve offline generation throughput. Smaller batches return audio sooner.</p></div></header><div class="benchmark-actions"><form method="post" action="/connections/{self._e(provider_id)}/benchmarks">{self._csrf(csrf)}<input type="hidden" name="mode" value="single"><label>Test one batch<select name="stream_chunk_frames">{options}</select></label><button class="primary"{disabled}>Run benchmark</button></form><form class="auto-tune" method="post" action="/connections/{self._e(provider_id)}/benchmarks">{self._csrf(csrf)}<input type="hidden" name="mode" value="auto"><div><strong>Auto-tune all six values</strong><p>Tests 16 → 32 → 64 → 128 → 256 → 512, then recommends the smallest batch within 3% of the fastest result.</p></div><button{disabled}>Run Auto-tune</button></form></div><div class="controlled-inputs"><span>Controlled inputs</span><p>Fixed original passage · Built-in narrator 04 · fixed instruction · fixed seed · engine-default sampling · safe automatic output ceiling</p></div></section><section class="benchmark-history"><div class="section-heading"><div><p class="eyebrow">Measurements</p><h2>Recent benchmark runs</h2><p>Listen to samples, apply a measured batch, or remove results you no longer need.</p></div><span class="count">{len([run for run in runs if run.status != 'running']):02d}</span></div>{history}</section></main>
         <aside class="stack"><section class="panel metric-guide"><header><div><p class="eyebrow">Reading results</p><h2>Realtime speed</h2></div></header><p><strong>1.0×</strong> means one minute of computation generates one minute of audio.</p><p><strong>2.0×</strong> means one minute of computation generates two minutes of audio.</p><p>Estimated audiobook time is labelled <strong>TTS generation only</strong>; it excludes queueing, retries, normalization, and M4B assembly.</p></section><section class="panel hardware-tuning"><header><div><p class="eyebrow">OpenMOSS server</p><h2>Hardware-side tuning</h2></div></header><p>Narranova cannot change launch flags on the external server. Compare these separately when configuring OpenMOSS:</p><ul><li><strong>Model quantization</strong> — Lower quantization reduces memory use and memory-bandwidth requirements and may improve throughput depending on the model, hardware, and backend.</li><li><strong>GPU offload</strong> — Confirm the intended device and layers are actually in use.</li><li><strong>Flash attention</strong> — Keep enabled when supported unless benchmarking shows otherwise.</li><li><strong>Context and launch configuration</strong> — Server-side batch and context choices can matter more than request controls.</li></ul></section></aside></div>"""
         return self._layout("Connection benchmark", body, environ)
 
@@ -845,7 +905,12 @@ class NarranovaWebApp:
             if run.error_message
             else ""
         )
-        return f"""<section class="benchmark-run"><div class="benchmark-run-heading"><div><span class="status status-{self._e(run.status)}">{self._e(run.status)}</span><strong>{'Auto-tune' if run.mode == 'auto' else 'Single batch'} · {self._e(run.created_at)}</strong><small>Run {self._e(run.id[:10])} · fixed seed {run.seed}</small></div>{f'<p>Recommended <strong>{run.recommended_stream_chunk_frames} frames</strong>: the smallest measured batch within 3% of peak speed.</p>' if run.recommended_stream_chunk_frames else ''}</div>{error}<div class="benchmark-results">{''.join(measurements)}</div></section>"""
+        recommendation = (
+            f'<p>Recommended <strong>{run.recommended_stream_chunk_frames} frames</strong>: the smallest measured batch within 3% of peak speed.</p>'
+            if run.recommended_stream_chunk_frames
+            else ""
+        )
+        return f"""<section class="benchmark-run"><div class="benchmark-run-heading"><div><span class="status status-{self._e(run.status)}">{self._e(run.status)}</span><strong>{'Auto-tune' if run.mode == 'auto' else 'Single batch'} · {self._e(run.created_at)}</strong><small>Run {self._e(run.id[:10])} · fixed seed {run.seed}</small></div><div class="benchmark-run-actions">{recommendation}<a class="danger-link" href="/connections/{self._e(provider_id)}/benchmarks/{self._e(run.id)}/delete">Delete</a></div></div>{error}<div class="benchmark-results">{''.join(measurements)}</div></section>"""
 
     def _voices(self, environ: dict[str, object], csrf: str) -> str:
         profiles = self.generation.list_voice_profiles()
@@ -910,6 +975,9 @@ class NarranovaWebApp:
 
     def _voice_studio(self, draft_id: str, environ: dict[str, object], csrf: str) -> str:
         draft = self.voice_studio.get(draft_id)
+        open_workflow = parse_qs(str(environ.get("QUERY_STRING", ""))).get(
+            "open", [""]
+        )[0]
         providers = [item for item in self.generation.list_providers() if item.enabled]
         selected_provider = str(draft.get("provider_id") or "")
         provider_options = "".join(
@@ -920,39 +988,73 @@ class NarranovaWebApp:
             f'<button type="button" class="prompt-chip" data-instruction="{self._e(instruction)}"><strong>{self._e(name)}</strong><span>{self._e(instruction)}</span></button>'
             for name, instruction in INSTRUCTION_PRESETS
         )
-        reference_options = ['<option value="none">No source reference — instruction only</option>']
-        if draft.get("uploaded_reference_path"):
-            reference_options.append('<option value="uploaded">Uploaded reference WAV</option>')
-        reference_options.extend(
-            f'<option value="take:{self._e(take["id"])}">Generated candidate · {len(draft["takes"]) - index:02d}</option>'
-            for index, take in enumerate(reversed(draft["takes"]))
+        generated_takes = [
+            take for take in draft["takes"] if take.get("reference_choice") != "uploaded"
+        ]
+        uploaded_takes = [
+            take for take in draft["takes"] if take.get("reference_choice") == "uploaded"
+        ]
+
+        def take_cards(takes: list[dict[str, object]], label: str, empty: str) -> str:
+            return "".join(
+                f"""<article class="take-card"><div class="take-index">{len(takes) - index:02d}</div><div class="take-main"><div><strong>{self._e(label)}</strong><span>{float(take['duration_seconds']):.1f} seconds</span></div><audio controls preload="none" src="/voices/drafts/{self._e(draft_id)}/takes/{self._e(str(take['id']))}/audio"></audio><details><summary>Instruction and quality settings</summary><p>{self._e(str(take['instruction']))}</p><small>{self._e(self._sampling_summary(take.get('sampling') or {}))}</small></details></div></article>"""
+                for index, take in enumerate(reversed(takes))
+            ) or f'<div class="empty-state compact"><span>♪</span><h3>{self._e(empty)}</h3><p>New audio will appear here without leaving this workflow.</p></div>'
+
+        generated_cards = take_cards(
+            generated_takes, "Reference candidate", "No reference candidates yet"
         )
-        takes = "".join(
-            f"""<article class="take-card"><div class="take-index">{len(draft['takes']) - index:02d}</div><div class="take-main"><div><strong>Reference candidate</strong><span>{float(take['duration_seconds']):.1f} seconds</span></div><audio controls preload="none" src="/voices/drafts/{self._e(draft_id)}/takes/{self._e(take['id'])}/audio"></audio><details><summary>Instruction and quality settings</summary><p>{self._e(take['instruction'])}</p><small>{self._e(self._sampling_summary(take.get('sampling') or {}))}</small></details></div></article>"""
-            for index, take in enumerate(reversed(draft["takes"]))
-        ) or '<div class="empty-state compact"><span>♪</span><h3>Your reference candidates will appear here</h3><p>Generate from the instruction alone, or provide a clean source sample to guide the voice.</p></div>'
-        save_references: list[str] = []
-        if draft.get("uploaded_reference_path"):
-            save_references.append('<label class="reference-radio"><input type="radio" name="reference_choice" value="uploaded"><span><strong>Uploaded WAV</strong><small>Keep the original reference</small></span></label>')
-        save_references.extend(
-            f'<label class="reference-radio"><input type="radio" name="reference_choice" value="take:{self._e(take["id"])}"{" checked" if index == 0 else ""}><span><strong>Audition take {len(draft["takes"]) - index:02d}</strong><small>{float(take["duration_seconds"]):.1f}s generated sample</small></span></label>'
-            for index, take in enumerate(reversed(draft["takes"]))
+        uploaded_cards = take_cards(
+            uploaded_takes, "Test sample", "No test samples yet"
         )
         can_audition = bool(providers)
-        can_save = bool(save_references and providers)
         connection_warning = (
             ""
             if can_audition
             else '<div class="studio-warning"><strong>Connection needed</strong><span>Add OpenMOSS before generating your first take.</span><a href="/connections">Set up connection →</a></div>'
         )
-        quality_controls = self._quality_sampling_controls(draft.get("sampling"))
-        audition_form = f"""<form class="audition-form" method="post" action="/voices/drafts/{self._e(draft_id)}/auditions" enctype="multipart/form-data">{self._csrf(csrf)}<div class="phase-title"><span>Step 1</span><div><h2>Create the reference audio</h2><p>Shape a short, repeatable voice sample before saving a reusable profile.</p></div></div>{connection_warning}<div class="form-row"><label>Connection<select name="provider_id" data-studio-provider required><option value="">Choose a connection</option>{provider_options}</select></label><label>Language<input name="language" value="{self._e(draft.get('language', 'English'))}"></label></div><fieldset data-studio-module="instructions"><legend>Narration instruction</legend><p class="field-help">Start with an example, then make it your own. Specific pacing and emotional guidance works best.</p><div class="prompt-grid">{preset_buttons}</div><label for="instruction">Instruction for the candidate<textarea id="instruction" name="instruction" rows="5" required>{self._e(draft.get('instruction', ''))}</textarea></label></fieldset><fieldset><legend>Short test passage</legend><p class="field-help">Edit these lines to test names, dialogue, punctuation, or a particular mood.</p><label for="sample_text">Text to generate<textarea id="sample_text" name="sample_text" rows="5" maxlength="2000" required>{self._e(draft.get('sample_text', ''))}</textarea></label></fieldset><fieldset data-studio-module="reference"><legend>Optional source sample</legend><p class="field-help">Leave this empty to create a candidate from instruction alone. You can also guide it with an uploaded WAV or an earlier candidate.</p><label>Source reference<select name="reference_choice">{''.join(reference_options)}</select></label><label class="file-drop">Upload a source WAV<input type="file" name="reference" accept="audio/wav,.wav"><span>Optional · short, clean speech works best</span></label></fieldset>{quality_controls}<input type="hidden" name="name" value="{self._e(draft.get('name', ''))}"><button class="primary wide-button"{"" if can_audition else " disabled"}>Generate reference candidate</button></form>"""
-        save_form = (
-            f"""<form method="post" action="/voices/drafts/{self._e(draft_id)}/save">{self._csrf(csrf)}<input type="hidden" name="provider_id" value="{self._e(selected_provider or (providers[0].id if providers else ''))}"><label>Profile name<input name="name" value="{self._e(draft.get('name', ''))}" placeholder="Warm literary narrator" required></label><fieldset class="reference-list"><legend>Reference audio</legend><p class="field-help">Choose only from audio created or uploaded in this draft. Its tested quality overrides are saved with it.</p>{''.join(save_references)}</fieldset><label>Instruction to pair with it<textarea name="instruction" rows="5" required>{self._e(draft.get('instruction', ''))}</textarea></label><label>Language<input name="language" value="{self._e(draft.get('language', 'English'))}"></label><button class="primary wide-button">Save instruction + reference profile</button><p class="cleanup-note">Saving keeps the selected pair and its explicit quality settings. Other candidate audio and draft files are deleted automatically.</p></form>"""
-            if can_save
-            else '<div class="empty-state compact"><h3>Complete step 1 first</h3><p>Upload a WAV or generate a reference candidate before pairing and saving.</p></div>'
+        sampling_controls = self._quality_sampling_controls(draft.get("sampling"))
+        instruction = self._e(draft.get("instruction", ""))
+        language = self._e(draft.get("language", "English"))
+        sample_text = self._e(draft.get("sample_text", ""))
+        generated_choices = "".join(
+            f'<label class="reference-radio"><input type="radio" name="reference_choice" value="take:{self._e(str(take["id"]))}"{" checked" if index == 0 else ""}><span><strong>Reference candidate {len(generated_takes) - index:02d}</strong><small>{float(take["duration_seconds"]):.1f}s · instruction saved exactly as tested</small><em>{self._e(str(take["instruction"]))}</em></span></label>'
+            for index, take in enumerate(reversed(generated_takes))
         )
-        body = f"""<a class="back" href="/voices">← Voice profiles</a><section class="studio-heading full-page-heading"><div><p class="eyebrow">Voice Lab</p><h1>Build a stable narrator</h1><p>First create the voice reference. Then pair it with precise instructions for consistent book-length narration.</p></div><form method="post" action="/voices/drafts/{self._e(draft_id)}/discard">{self._csrf(csrf)}<button class="quiet-danger">Discard draft</button></form></section><ol class="lab-progress"><li class="active"><span>1</span><div><strong>Create reference</strong><small>Generate and review short candidates</small></div></li><li class="{'active' if can_save else ''}"><span>2</span><div><strong>Pair and save</strong><small>Lock reference audio with instructions</small></div></li></ol><div class="studio-grid"><main class="panel studio-builder">{audition_form}</main><aside class="studio-results"><section><div class="section-heading"><div><p class="eyebrow">Step 1 results</p><h2>Reference candidates</h2></div><span class="count">{len(draft['takes']):02d}</span></div><div class="take-list">{takes}</div></section><section class="panel save-profile"><header><div><p class="eyebrow">Step 2</p><h2>Pair and save the profile</h2></div></header>{save_form}</section></aside></div>"""
+        generated_save = (
+            f"""<form class="pair-save-form" method="post" action="/voices/drafts/{self._e(draft_id)}/save">{self._csrf(csrf)}<fieldset class="reference-list"><legend>Save a generated pair</legend><p class="field-help">Choose a candidate. Its exact tested audio, instruction, language, connection, and quality settings stay together.</p>{generated_choices}</fieldset><label>Profile name<input name="name" value="{self._e(draft.get('name', ''))}" placeholder="My fiction narrator" required></label><button class="primary wide-button">Create selected pair</button><p class="cleanup-note">All other candidate audio and draft files are deleted automatically.</p></form>"""
+            if generated_takes
+            else ""
+        )
+        uploaded_reference = (
+            f'<div class="uploaded-reference"><div><strong>Uploaded reference</strong><small>Ready to test or save</small></div><audio controls preload="none" src="/voices/drafts/{self._e(draft_id)}/reference/audio"></audio></div>'
+            if draft.get("uploaded_reference_path")
+            else ""
+        )
+        uploaded_choices = "".join(
+            f'<label class="reference-radio"><input type="radio" name="reference_choice" value="uploaded:{self._e(str(take["id"]))}"{" checked" if index == 0 else ""}><span><strong>Tested pair {len(uploaded_takes) - index:02d}</strong><small>{float(take["duration_seconds"]):.1f}s test · original uploaded reference will be saved</small><em>{self._e(str(take["instruction"]))}</em></span></label>'
+            for index, take in enumerate(reversed(uploaded_takes))
+        )
+        uploaded_save = (
+            f"""<form class="pair-save-form" method="post" action="/voices/drafts/{self._e(draft_id)}/save">{self._csrf(csrf)}<fieldset class="reference-list"><legend>Save your uploaded pair</legend><p class="field-help">Choose the test whose instruction you want. Narranova saves that exact instruction with your original uploaded recording.</p>{uploaded_choices}</fieldset><label>Profile name<input name="name" value="{self._e(draft.get('name', ''))}" placeholder="My recorded narrator" required></label><button class="primary wide-button">Create selected pair</button><p class="cleanup-note">Generated test samples are deleted after the pair is saved.</p></form>"""
+            if draft.get("uploaded_reference_path") and uploaded_takes
+            else ""
+        )
+        generated_workflow = f"""<details class="panel lab-workflow"><summary><span>Workflow one</span><div><h2>Design a narrator</h2><p>Generate a short reference voice from written direction, review it, then save the best result as a reusable pair.</p></div><b aria-hidden="true">+</b></summary><div class="lab-workflow-body">{connection_warning}<form class="lab-form" method="post" action="/voices/drafts/{self._e(draft_id)}/auditions" enctype="multipart/form-data">{self._csrf(csrf)}<div class="lab-field-row"><label>Connection<select name="provider_id" data-studio-provider required><option value="">Choose a connection</option>{provider_options}</select></label><label>Language<input name="language" value="{language}"></label></div><fieldset data-studio-module="instructions"><legend>Narration direction</legend><p class="field-help">Choose a starting point or write precise guidance for pacing, delivery, dialogue, and tone.</p><div class="prompt-grid">{preset_buttons}</div><label>Instruction<textarea name="instruction" data-instruction-field rows="5" required>{instruction}</textarea></label></fieldset><fieldset><legend>Reference passage</legend><p class="field-help">Use a short passage that exercises narration, dialogue, and pauses.</p><label>Text to generate<textarea name="sample_text" rows="5" maxlength="2000" required>{sample_text}</textarea></label></fieldset><input type="hidden" name="reference_choice" value="none">{sampling_controls}<input type="hidden" name="name" value="{self._e(draft.get('name', ''))}"><button class="primary wide-button"{"" if can_audition else " disabled"}>Generate reference audio</button></form><section class="lab-results"><div class="section-heading"><div><p class="eyebrow">Generated references</p><h3>Choose the voice you want to keep</h3></div><span class="count">{len(generated_takes):02d}</span></div><div class="take-list">{generated_cards}</div>{generated_save}</section></div></details>"""
+        uploaded_workflow = f"""<details class="panel lab-workflow"><summary><span>Workflow two</span><div><h2>Bring your own reference</h2><p>Upload clean speech, test how its instruction carries into new text, then save the original recording as your pair.</p></div><b aria-hidden="true">+</b></summary><div class="lab-workflow-body">{connection_warning}<form class="lab-form" method="post" action="/voices/drafts/{self._e(draft_id)}/auditions" enctype="multipart/form-data">{self._csrf(csrf)}<div class="lab-field-row"><label>Connection<select name="provider_id" data-studio-provider required><option value="">Choose a connection</option>{provider_options}</select></label><label>Language<input name="language" value="{language}"></label></div><fieldset data-studio-module="reference"><legend>Your reference recording</legend><p class="field-help">Use a short, clean WAV containing only the narrator’s voice.</p><label class="file-drop">{"Replace the uploaded WAV" if draft.get('uploaded_reference_path') else "Choose a WAV"}<input type="file" name="reference" accept="audio/wav,.wav"{"" if draft.get('uploaded_reference_path') else " required"}><span>Speech without music, effects, or background noise works best</span></label>{uploaded_reference}</fieldset><fieldset data-studio-module="instructions"><legend>Matching narration direction</legend><p class="field-help">Describe the qualities the engine should preserve from your recording.</p><div class="prompt-grid">{preset_buttons}</div><label>Instruction<textarea name="instruction" data-instruction-field rows="5" required>{instruction}</textarea></label></fieldset><fieldset><legend>Test passage</legend><p class="field-help">This creates a disposable sample so you can judge the pairing before saving it.</p><label>Text to generate<textarea name="sample_text" rows="5" maxlength="2000" required>{sample_text}</textarea></label></fieldset><input type="hidden" name="reference_choice" value="uploaded">{sampling_controls}<input type="hidden" name="name" value="{self._e(draft.get('name', ''))}"><button class="primary wide-button"{"" if can_audition else " disabled"}>Generate test sample</button></form><section class="lab-results"><div class="section-heading"><div><p class="eyebrow">Reference tests</p><h3>Listen before you save</h3></div><span class="count">{len(uploaded_takes):02d}</span></div><div class="take-list">{uploaded_cards}</div>{uploaded_save}</section></div></details>"""
+        if open_workflow == "generated":
+            generated_workflow = generated_workflow.replace(
+                '<details class="panel lab-workflow">',
+                '<details class="panel lab-workflow" open>',
+                1,
+            )
+        elif open_workflow == "uploaded":
+            uploaded_workflow = uploaded_workflow.replace(
+                '<details class="panel lab-workflow">',
+                '<details class="panel lab-workflow" open>',
+                1,
+            )
+        body = f"""<a class="back" href="/voices">← Voice profiles</a><section class="studio-heading full-page-heading"><div><p class="eyebrow">Voice Lab</p><h1>Build a stable narrator</h1><p>Choose one path: create a reference voice from direction, or test a recording of your own.</p></div><form method="post" action="/voices/drafts/{self._e(draft_id)}/discard">{self._csrf(csrf)}<button class="quiet-danger">Discard draft</button></form></section><div class="voice-lab-stack">{generated_workflow}{uploaded_workflow}</div>"""
         return self._layout("Voice Lab", body, environ)
 
     def _new_narration(self, book_id: str, environ: dict[str, object], csrf: str) -> str:
@@ -1055,6 +1157,7 @@ class NarranovaWebApp:
         completed = sum(chunk.status == "completed" for chunk in chunks)
         percent = round((completed / len(chunks)) * 100) if chunks else 0
         status = str(job["status"])
+        chapter_pause_requested = job.get("pause_after_chapter_index") is not None
         regenerating = self.supervisor.is_regenerating(job_id)
         assembling = status == "assembling" or self.supervisor.is_assembling(job_id)
         all_completed = bool(chunks) and completed == len(chunks)
@@ -1087,7 +1190,7 @@ class NarranovaWebApp:
             if regenerating
             else "Generation in progress"
         )
-        controls = f"""<form method="post" action="/jobs/{self._e(job_id)}/run" data-job-start{' hidden' if not startable else ''}>{self._csrf(csrf)}<button class="primary" data-job-start-label>{start_label}</button></form><span class="running-mark" data-job-running{' hidden' if status not in {'generating', 'assembling'} else ''}><i></i><b data-job-running-label>{running_label}</b></span><form method="post" action="/jobs/{self._e(job_id)}/pause" data-job-pause{' hidden' if status != 'generating' or regenerating else ''}>{self._csrf(csrf)}<button>Pause after chunk</button></form><span class="pause-mark" data-job-pause-requested{' hidden' if status != 'pause_requested' else ''}>Pause requested · finishing current chunk</span><span class="complete-mark" data-job-complete{' hidden' if status != 'completed' else ''}>✓ Generation complete</span><a class="danger-link job-delete" href="/jobs/{self._e(job_id)}/delete">Delete job</a>"""
+        controls = f"""<form method="post" action="/jobs/{self._e(job_id)}/run" data-job-start{' hidden' if not startable else ''}>{self._csrf(csrf)}<button class="primary" data-job-start-label>{start_label}</button></form><span class="running-mark" data-job-running{' hidden' if status not in {'generating', 'assembling'} else ''}><i></i><b data-job-running-label>{running_label}</b></span><form method="post" action="/jobs/{self._e(job_id)}/pause" data-job-pause{' hidden' if status != 'generating' or regenerating or chapter_pause_requested else ''}>{self._csrf(csrf)}<button>Pause after chunk</button></form><form method="post" action="/jobs/{self._e(job_id)}/pause-chapter" data-job-pause-chapter{' hidden' if status != 'generating' or regenerating or chapter_pause_requested else ''}>{self._csrf(csrf)}<button>Stop after chapter</button></form><span class="pause-mark" data-job-chapter-pause-requested{' hidden' if not chapter_pause_requested else ''}>Stop requested · finishing current chapter</span><span class="pause-mark" data-job-pause-requested{' hidden' if status != 'pause_requested' else ''}>Pause requested · finishing current chunk</span><span class="complete-mark" data-job-complete{' hidden' if status != 'completed' else ''}>✓ Generation complete</span><a class="danger-link job-delete" href="/jobs/{self._e(job_id)}/delete">Delete job</a>"""
         error_message = str(job.get("error_message") or "")
         error = f'<div class="alert" data-job-error{"" if error_message else " hidden"}>{self._e(error_message)}</div>'
         output_rows = self._output_rows(job_id, artifacts)
@@ -1188,6 +1291,8 @@ class NarranovaWebApp:
         content = json.dumps(
             {
                 "status": job["status"],
+                "chapter_pause_requested": job.get("pause_after_chapter_index")
+                is not None,
                 "regenerating": self.supervisor.is_regenerating(job_id),
                 "assembling": self.supervisor.is_assembling(job_id),
                 "error": job.get("error_message") or "",
@@ -1249,6 +1354,42 @@ class NarranovaWebApp:
                 ),
                 "error": run.error_message or "",
             }
+        ).encode("utf-8")
+        return self._respond(
+            start_response,
+            "200 OK",
+            content,
+            "application/json; charset=utf-8",
+        )
+
+    def _connection_health(
+        self, start_response: StartResponse, provider_id: str
+    ) -> Iterable[bytes]:
+        provider = self.generation.get_provider(provider_id)
+        healthy = False
+        model = ""
+        error = ""
+        try:
+            if provider["kind"] != "openmoss":
+                raise ValueError("Health checks are not implemented for this engine")
+            information = OpenMossProvider(
+                OpenMossConfig.from_connection(
+                    str(provider["endpoint_url"]),
+                    provider["configuration"],
+                    timeout_seconds=3,
+                )
+            ).health()
+            healthy = True
+            model = str(
+                information.get("architecture")
+                or information.get("model")
+                or information.get("model_name")
+                or ""
+            )
+        except Exception as exc:
+            error = str(exc)
+        content = json.dumps(
+            {"healthy": healthy, "model": model, "error": error}
         ).encode("utf-8")
         return self._respond(
             start_response,
@@ -1459,6 +1600,14 @@ class NarranovaWebApp:
         path, _ = self.voice_studio.take_audio(draft_id, take_id)
         return self._respond(start_response, "200 OK", path.read_bytes(), "audio/wav")
 
+    def _studio_uploaded_audio(
+        self,
+        start_response: StartResponse,
+        draft_id: str,
+    ) -> Iterable[bytes]:
+        path, _ = self.voice_studio.uploaded_audio(draft_id)
+        return self._respond(start_response, "200 OK", path.read_bytes(), "audio/wav")
+
     def _profile_audio(
         self,
         start_response: StartResponse,
@@ -1627,6 +1776,7 @@ def create_web_app(
     database.initialize()
     books = BookRepository(database)
     generation = GenerationRepository(database)
+    generation.recover_interrupted_jobs()
     generation.recover_interrupted_assemblies()
     benchmark_repository = BenchmarkRepository(database)
     benchmark_repository.recover_interrupted()

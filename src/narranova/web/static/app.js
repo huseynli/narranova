@@ -50,6 +50,10 @@ if (themeToggle) {
 }
 
 const jobMonitor = document.querySelector("[data-job-monitor]");
+
+document.querySelectorAll(".chapter-choice input").forEach((choice) => {
+  choice.addEventListener("click", (event) => event.stopPropagation());
+});
 const benchmarkMonitor = document.querySelector("[data-benchmark-monitor]");
 
 function setJobControl(name, visible) {
@@ -209,7 +213,9 @@ function updateJobPage(state) {
     || (state.compacted && status === "completed");
   setJobControl("start", startable);
   setJobControl("running", ["generating", "assembling"].includes(status));
-  setJobControl("pause", status === "generating" && !state.regenerating);
+  setJobControl("pause", status === "generating" && !state.regenerating && !state.chapter_pause_requested);
+  setJobControl("pause-chapter", status === "generating" && !state.regenerating && !state.chapter_pause_requested);
+  setJobControl("chapter-pause-requested", Boolean(state.chapter_pause_requested));
   setJobControl("pause-requested", status === "pause_requested");
   setJobControl("complete", status === "completed");
   setJobControl("assemble", Boolean(state.can_assemble));
@@ -314,13 +320,35 @@ if (benchmarkMonitor) {
   window.setTimeout(pollBenchmark, 600);
 }
 
+document.querySelectorAll("[data-connection-health]").forEach(async (indicator) => {
+  const label = indicator.querySelector("b");
+  try {
+    const response = await fetch(indicator.dataset.healthUrl, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) throw new Error("Connection health request failed");
+    const state = await response.json();
+    indicator.classList.remove("checking");
+    indicator.classList.add(state.healthy ? "healthy" : "unhealthy");
+    if (label) label.textContent = state.healthy ? "Connected" : "Unavailable";
+    indicator.title = state.healthy ? (state.model || "Connection healthy") : (state.error || "Connection unavailable");
+  } catch (error) {
+    indicator.classList.remove("checking");
+    indicator.classList.add("unhealthy");
+    if (label) label.textContent = "Unavailable";
+    indicator.title = "Could not complete the connection check";
+  }
+});
+
 document.querySelectorAll("[data-instruction]").forEach((button) => {
   button.addEventListener("click", () => {
-    const field = document.querySelector("#instruction");
+    const form = button.closest("form");
+    const field = form?.querySelector("[data-instruction-field]");
     if (!field) return;
     field.value = button.dataset.instruction || "";
     field.focus();
-    document.querySelectorAll("[data-instruction]").forEach((item) => {
+    form.querySelectorAll("[data-instruction]").forEach((item) => {
       item.classList.toggle("selected", item === button);
     });
   });
@@ -364,27 +392,26 @@ if (providerSelect && profileSelect) {
   filterProfiles();
 }
 
-const studioProvider = document.querySelector("[data-studio-provider]");
-
-function updateStudioModules() {
-  if (!studioProvider) return;
+function updateStudioModules(studioProvider) {
+  const form = studioProvider.closest("form");
+  if (!form) return;
   const option = studioProvider.selectedOptions[0];
   const instructions = option?.dataset.instructions !== "false";
   const reference = option?.dataset.reference !== "false";
   const sampling = option?.dataset.sampling !== "false";
-  document.querySelectorAll('[data-studio-module="instructions"]').forEach((module) => {
+  form.querySelectorAll('[data-studio-module="instructions"]').forEach((module) => {
     module.hidden = !instructions;
     module.querySelectorAll("textarea, input, select").forEach((field) => {
       field.disabled = !instructions;
     });
   });
-  document.querySelectorAll('[data-studio-module="reference"]').forEach((module) => {
+  form.querySelectorAll('[data-studio-module="reference"]').forEach((module) => {
     module.hidden = !reference;
     module.querySelectorAll("textarea, input, select").forEach((field) => {
       field.disabled = !reference;
     });
   });
-  document.querySelectorAll('[data-studio-module="sampling"]').forEach((module) => {
+  form.querySelectorAll('[data-studio-module="sampling"]').forEach((module) => {
     module.hidden = !sampling;
     module.querySelectorAll("textarea, input, select").forEach((field) => {
       field.disabled = !sampling;
@@ -392,7 +419,7 @@ function updateStudioModules() {
   });
 }
 
-if (studioProvider) {
-  studioProvider.addEventListener("change", updateStudioModules);
-  updateStudioModules();
-}
+document.querySelectorAll("[data-studio-provider]").forEach((studioProvider) => {
+  studioProvider.addEventListener("change", () => updateStudioModules(studioProvider));
+  updateStudioModules(studioProvider);
+});

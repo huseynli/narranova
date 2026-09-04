@@ -532,10 +532,26 @@ class GenerationRepository:
                 (job_id,),
             )
             connection.execute(
-                "UPDATE jobs SET status = 'ready', updated_at = CURRENT_TIMESTAMP "
+                "UPDATE jobs SET status = 'ready', pause_after_chapter_index = NULL, "
+                "updated_at = CURRENT_TIMESTAMP "
                 "WHERE id = ? AND status IN ('generating', 'failed')",
                 (job_id,),
             )
+
+    def recover_interrupted_jobs(self) -> int:
+        """Pause synthesis work that cannot still be active after process startup."""
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE chunks SET status = 'pending' WHERE status = 'generating'"
+            )
+            cursor = connection.execute(
+                """
+                UPDATE jobs SET status = 'paused', pause_after_chapter_index = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status IN ('generating', 'pause_requested')
+                """
+            )
+        return cursor.rowcount
 
     def recover_interrupted_assemblies(self) -> int:
         """Make packaging jobs retryable after the serving process stopped."""
@@ -558,7 +574,9 @@ class GenerationRepository:
         with self.database.connect() as connection:
             cursor = connection.execute(
                 """
-                UPDATE jobs SET status = 'pause_requested', updated_at = CURRENT_TIMESTAMP
+                UPDATE jobs SET status = 'pause_requested',
+                    pause_after_chapter_index = NULL,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status IN ('ready', 'generating')
                 """,
                 (job_id,),
@@ -566,17 +584,56 @@ class GenerationRepository:
         if cursor.rowcount == 0 and self.job_status(job_id) not in {"paused", "completed"}:
             raise ValueError("Only ready or generating jobs can be paused")
 
+    def request_pause_after_chapter(self, job_id: str) -> int:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT chapter_index FROM chunks
+                WHERE job_id = ? AND status = 'generating'
+                ORDER BY chapter_index, chunk_index LIMIT 1
+                """,
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    "Wait for a chunk to begin before stopping after its chapter"
+                )
+            chapter_index = int(row[0])
+            cursor = connection.execute(
+                """
+                UPDATE jobs SET pause_after_chapter_index = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = 'generating'
+                """,
+                (chapter_index, job_id),
+            )
+        if cursor.rowcount != 1:
+            raise ValueError("Only a generating job can stop after a chapter")
+        return chapter_index
+
+    def pause_after_chapter(self, job_id: str) -> int | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT pause_after_chapter_index FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Generation job not found: {job_id}")
+        return int(row[0]) if row[0] is not None else None
+
     def mark_paused(self, job_id: str) -> None:
         with self.database.connect() as connection:
             connection.execute(
-                "UPDATE jobs SET status = 'paused', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                "UPDATE jobs SET status = 'paused', pause_after_chapter_index = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (job_id,),
             )
 
     def resume(self, job_id: str) -> None:
         with self.database.connect() as connection:
             connection.execute(
-                "UPDATE jobs SET status = 'ready', updated_at = CURRENT_TIMESTAMP "
+                "UPDATE jobs SET status = 'ready', pause_after_chapter_index = NULL, "
+                "updated_at = CURRENT_TIMESTAMP "
                 "WHERE id = ? AND status IN ('paused', 'pause_requested')",
                 (job_id,),
             )
@@ -586,7 +643,8 @@ class GenerationRepository:
             cursor = connection.execute(
                 """
                 UPDATE jobs SET status = 'generating', error_message = NULL,
-                    compacted_at = NULL, updated_at = CURRENT_TIMESTAMP
+                    compacted_at = NULL, pause_after_chapter_index = NULL,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status IN ('ready', 'failed', 'completed')
                 """,
                 (job_id,),
@@ -675,6 +733,7 @@ class GenerationRepository:
             )
             connection.execute(
                 "UPDATE jobs SET status = 'failed', error_message = ?, "
+                "pause_after_chapter_index = NULL, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (message, job_id),
             )
@@ -730,6 +789,7 @@ class GenerationRepository:
         with self.database.connect() as connection:
             connection.execute(
                 "UPDATE jobs SET status = 'completed', error_message = NULL, "
+                "pause_after_chapter_index = NULL, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (job_id,),
             )

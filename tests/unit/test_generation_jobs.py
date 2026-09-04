@@ -83,6 +83,65 @@ class GenerationJobTests(unittest.TestCase):
         self.assertGreater(first, 0)
         self.assertLessEqual(first, 2_147_483_647)
 
+    def test_stop_after_chapter_finishes_current_chapter_then_pauses(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            source = root / "book.epub"
+            reference = root / "reference.wav"
+            make_epub(source)
+            make_wave(reference)
+            layout = ArtifactLayout.at(data)
+            layout.initialize()
+            store = ArtifactStore(data)
+            database = Database(data / "narranova.sqlite3")
+            database.initialize()
+            books = BookRepository(database)
+            generation = GenerationRepository(database)
+            imported = ImportBook(EpubParser(), books, layout, store).execute(source)
+            profiles = VoiceProfiles(generation, layout, store)
+            provider_id = profiles.add_openmoss_provider(
+                "Test MOSS", "http://moss.test:8000/tts"
+            )
+            profile_id = profiles.create_openmoss_profile(
+                provider_id=provider_id,
+                reference_audio=reference,
+                instruction="A careful narrator.",
+                name="Careful narrator",
+            )
+
+            class ChapterStopProvider(FakeProvider):
+                def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
+                    result = super().synthesize(request)
+                    if len(self.requests) == 1:
+                        generation.request_pause_after_chapter(job_id)
+                    return result
+
+            provider = ChapterStopProvider()
+            jobs = GenerationJobs(
+                books,
+                generation,
+                layout,
+                store,
+                provider_factory=lambda job: provider,
+                masters=FakeAudioMasters(),
+            )
+            job_id = jobs.create(imported.book_id, profile_id)
+
+            jobs.run(job_id)
+
+            chunks = generation.list_chunks(job_id)
+            completed_chapters = {
+                chunk.chapter_index for chunk in chunks if chunk.status == "completed"
+            }
+            pending_chapters = {
+                chunk.chapter_index for chunk in chunks if chunk.status == "pending"
+            }
+            self.assertEqual(generation.job_status(job_id), "paused")
+            self.assertEqual(len(completed_chapters), 1)
+            self.assertTrue(pending_chapters)
+            self.assertTrue(all(chapter > max(completed_chapters) for chapter in pending_chapters))
+
     def test_job_generates_resumes_and_repairs_corrupt_completed_audio(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -408,6 +467,41 @@ class GenerationJobTests(unittest.TestCase):
             generation.recover_interrupted("j")
 
             self.assertEqual(generation.get_job("j")["status"], "ready")
+            self.assertEqual(generation.list_chunks("j")[0].status, "pending")
+
+    def test_startup_pauses_interrupted_jobs_and_clears_chapter_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            database = Database(data / "narranova.sqlite3")
+            database.initialize()
+            generation = GenerationRepository(database)
+            with database.connect() as connection:
+                connection.execute(
+                    "INSERT INTO provider_instances(id, kind, name, endpoint_url) "
+                    "VALUES ('p', 'openmoss', 'MOSS', 'http://moss/tts')"
+                )
+                connection.execute(
+                    "INSERT INTO books(id, source_sha256, source_artifact_path) "
+                    "VALUES ('b', 'hash', 'source.epub')"
+                )
+                connection.execute(
+                    "INSERT INTO narrator_profiles(id, provider_instance_id, "
+                    "profile_json, profile_sha256) VALUES ('v', 'p', '{}', 'hash')"
+                )
+                connection.execute(
+                    "INSERT INTO jobs(id, book_id, narrator_profile_id, status, "
+                    "pause_after_chapter_index) VALUES ('j', 'b', 'v', 'generating', 2)"
+                )
+                connection.execute(
+                    "INSERT INTO chunks(id, logical_id, job_id, chapter_index, chunk_index, "
+                    "text_sha256, text_artifact_path, status) "
+                    "VALUES ('j-c', 'c', 'j', 2, 1, 'hash', 'text.txt', 'generating')"
+                )
+
+            self.assertEqual(generation.recover_interrupted_jobs(), 1)
+
+            self.assertEqual(generation.get_job("j")["status"], "paused")
+            self.assertIsNone(generation.pause_after_chapter("j"))
             self.assertEqual(generation.list_chunks("j")[0].status, "pending")
 
 

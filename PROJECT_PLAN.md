@@ -291,7 +291,7 @@ Provider configuration must be administrator-only in a multi-user deployment.
 The Connections page owns endpoint configuration, health testing, available
 OpenMOSS/model information, and performance benchmarking. Its OpenMOSS
 benchmark uses a fixed original passage of roughly one printed page, built-in
-narrator pair 01, its matching instruction, a fixed seed, and engine-default
+narrator pair 04, its matching instruction, a fixed seed, and engine-default
 sampling. It never reads text from an imported book.
 
 The user-facing performance control is `stream_chunk_frames`, labelled
@@ -455,6 +455,8 @@ pending -> generating -> completed
 Rules:
 
 - `Pause` lets the active request finish and pauses before the next chunk.
+- `Stop after chapter` finishes every remaining chunk in the active chapter,
+  then pauses before the first chunk of the next included chapter.
 - `Stop now` attempts to abort the active request, removes only its incomplete
   temporary output, and returns that chunk to `pending`.
 - Container shutdown leaves active work recoverable on restart.

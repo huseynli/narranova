@@ -25,24 +25,28 @@ from narranova.providers import (
 
 INSTRUCTION_PRESETS: tuple[tuple[str, str], ...] = (
     (
-        "Warm literary",
-        "A warm, intimate audiobook narrator. Use measured pacing, clear diction, "
-        "restrained emotion, and subtle character distinction. Avoid theatrical delivery.",
+        "Natural contemporary fiction",
+        "Read as a polished contemporary audiobook narrator: conversational and grounded, "
+        "with crisp diction, medium pacing, and natural sentence endings. Keep character "
+        "dialogue distinct through subtle rhythm and attitude, not impersonation.",
     ),
     (
-        "Clear nonfiction",
-        "A clear, confident nonfiction narrator. Use an even pace, precise pronunciation, "
-        "natural emphasis, and a short pause at each section transition.",
+        "Expansive science fiction",
+        "Narrate with calm authority and a sense of scale. Keep exposition lucid, technical "
+        "terms precise, and pacing deliberate without becoming slow. Let wonder, tension, "
+        "and dry humor emerge from the prose; use restrained distinctions for dialogue.",
     ),
     (
-        "Grounded suspense",
-        "A grounded suspense narrator. Keep the delivery controlled and close, building "
-        "tension through pacing and emphasis rather than exaggerated voices.",
+        "Intimate mystery",
+        "Use a close, observant delivery with controlled tension. Favor clean pauses, "
+        "purposeful emphasis, and a steady pace. Keep revelations understated and dialogue "
+        "believable; avoid trailer-style intensity, whispering, or exaggerated suspense.",
     ),
     (
-        "Gentle and reflective",
-        "A gentle, reflective narrator with an unhurried cadence, soft warmth, and crisp "
-        "enunciation. Let emotional moments breathe without becoming sentimental.",
+        "Direct narrative nonfiction",
+        "Read with clarity, curiosity, and quiet confidence. Maintain an even, energetic "
+        "pace, articulate names and numbers carefully, and use brief pauses to separate "
+        "ideas. Sound engaged rather than promotional, academic, or overly solemn.",
     ),
 )
 
@@ -212,6 +216,10 @@ class VoiceStudio:
         language: str,
     ) -> str:
         draft = self.get(draft_id)
+        pair_take = self._pair_take(draft, reference_choice)
+        provider_id = str(pair_take["provider_id"])
+        instruction = str(pair_take["instruction"])
+        language = str(pair_take.get("language") or "English")
         provider = self.generation.get_provider(provider_id)
         if not provider["enabled"]:
             raise ValueError("The selected TTS connection is disabled")
@@ -222,7 +230,7 @@ class VoiceStudio:
                 "Choose a reference created or uploaded in this Voice Lab draft"
             )
         reference = self._reference(draft, reference_choice, required=True)
-        sampling = self._sampling_for_reference(draft, reference_choice)
+        sampling = dict(pair_take.get("sampling") or {})
         profile_id = self.profiles.create_openmoss_profile(
             provider_id=provider_id,
             reference_audio=reference,
@@ -244,6 +252,12 @@ class VoiceStudio:
         if self.store.sha256(path) != take["audio_sha256"]:
             raise RuntimeError("Voice Studio audio failed hash validation")
         return path, str(take["audio_sha256"])
+
+    def uploaded_audio(self, draft_id: str) -> tuple[Path, str]:
+        draft = self.get(draft_id)
+        path = self._reference(draft, "uploaded", required=True)
+        assert path is not None
+        return path, str(draft["uploaded_reference_sha256"])
 
     def discard(self, draft_id: str) -> None:
         draft_root = self.layout.voice_studio_draft(draft_id)
@@ -268,7 +282,7 @@ class VoiceStudio:
     ) -> Path | None:
         if choice in {"", "none"} and not required:
             return None
-        if choice == "uploaded":
+        if choice == "uploaded" or choice.startswith("uploaded:"):
             relative = draft.get("uploaded_reference_path")
             expected_hash = draft.get("uploaded_reference_sha256")
         elif choice.startswith("profile:"):
@@ -297,16 +311,39 @@ class VoiceStudio:
         self.store.write_text(path, json.dumps(draft, ensure_ascii=False, sort_keys=True))
 
     @staticmethod
-    def _sampling_for_reference(
+    def _pair_take(
         draft: dict[str, Any], reference_choice: str
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         if reference_choice.startswith("take:"):
             take_id = reference_choice.split(":", 1)[1]
-            take = next((item for item in draft["takes"] if item["id"] == take_id), None)
-            if take is None:
-                raise KeyError(f"Voice Studio take not found: {take_id}")
-            return dict(take.get("sampling") or {})
-        return dict(draft.get("sampling") or {})
+            take = next(
+                (item for item in draft["takes"] if item["id"] == take_id), None
+            )
+        elif reference_choice.startswith("uploaded:"):
+            take_id = reference_choice.split(":", 1)[1]
+            take = next(
+                (
+                    item
+                    for item in draft["takes"]
+                    if item["id"] == take_id
+                    and item.get("reference_choice") == "uploaded"
+                ),
+                None,
+            )
+        elif reference_choice == "uploaded":
+            take = next(
+                (
+                    item
+                    for item in reversed(draft["takes"])
+                    if item.get("reference_choice") == "uploaded"
+                ),
+                None,
+            )
+        else:
+            take = None
+        if take is None:
+            raise ValueError("Choose a tested audio and instruction pair to save")
+        return take
 
     def _artifact(self, relative_path: str) -> Path:
         path = (self.layout.root / relative_path).resolve()

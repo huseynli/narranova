@@ -118,6 +118,13 @@ class ConnectionBenchmarkTests(unittest.TestCase):
             self.assertEqual(configuration["stream_chunk_frames"], 128)
             self.assertEqual(configuration["recommended_stream_chunk_frames"], 128)
 
+            benchmark_root = layout.connection_benchmark_root(provider_id, benchmark_id)
+            self.assertTrue(benchmark_root.is_dir())
+            benchmarks.delete(provider_id, benchmark_id)
+            self.assertFalse(benchmark_root.exists())
+            with self.assertRaises(KeyError):
+                repository.get_run(benchmark_id)
+
     def test_rejects_unsupported_batch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             data = Path(temporary) / "data"

@@ -375,6 +375,13 @@ class GenerationJobs:
             if self.generation.job_status(job_id) == "pause_requested":
                 self.generation.mark_paused(job_id)
                 return
+            pause_after_chapter = self.generation.pause_after_chapter(job_id)
+            if (
+                pause_after_chapter is not None
+                and chunk.chapter_index > pause_after_chapter
+            ):
+                self.generation.mark_paused(job_id)
+                return
             replacing_completed_audio = chunk.status == "completed"
             if replacing_completed_audio and self._completed_chunk_is_valid(chunk):
                 continue

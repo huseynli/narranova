@@ -100,6 +100,20 @@ class BenchmarkRepository:
             ).fetchall()
         return [self._stored_run(row) for row in rows]
 
+    def delete_run(self, benchmark_id: str) -> StoredBenchmarkRun:
+        run = self.get_run(benchmark_id)
+        if run.status == "running":
+            raise ValueError("A running benchmark cannot be deleted")
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM connection_benchmark_runs "
+                "WHERE id = ? AND status != 'running'",
+                (benchmark_id,),
+            )
+        if cursor.rowcount != 1:
+            raise ValueError("Benchmark could not be deleted")
+        return run
+
     def set_active_frame(self, benchmark_id: str, frames: int) -> None:
         with self.database.connect() as connection:
             cursor = connection.execute(

@@ -94,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     create_job_parser.add_argument("book_id")
     create_job_parser.add_argument(
-        "voice_profile_id", help="saved profile ID or built-in selector such as builtin:01"
+        "voice_profile_id", help="saved profile ID or built-in selector such as builtin:04"
     )
     create_job_parser.add_argument(
         "--provider-id", help="required for a built-in narrator pair"
