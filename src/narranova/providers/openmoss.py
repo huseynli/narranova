@@ -24,6 +24,7 @@ from narranova.providers.base import (
 
 
 OPENMOSS_DEFAULT_MAX_NEW_TOKENS = 6000
+OPENMOSS_DEFAULT_STREAM_CHUNK_FRAMES = 128
 OPENMOSS_STREAM_FRAME_OPTIONS = (16, 32, 64, 128, 256, 512)
 
 
@@ -164,7 +165,9 @@ def openmoss_performance_settings(values: Mapping[str, object] | None) -> dict[s
     """Read only request-level performance settings from connection configuration."""
 
     configuration = values or {}
-    frames_raw = configuration.get("stream_chunk_frames", 16)
+    frames_raw = configuration.get(
+        "stream_chunk_frames", OPENMOSS_DEFAULT_STREAM_CHUNK_FRAMES
+    )
     tokens_raw = configuration.get("max_new_tokens", OPENMOSS_DEFAULT_MAX_NEW_TOKENS)
     if isinstance(frames_raw, bool) or isinstance(tokens_raw, bool):
         raise ValueError("OpenMOSS performance settings must be whole numbers")
@@ -186,7 +189,7 @@ def openmoss_performance_settings(values: Mapping[str, object] | None) -> dict[s
 class OpenMossConfig:
     endpoint_url: str
     max_new_tokens: int = OPENMOSS_DEFAULT_MAX_NEW_TOKENS
-    stream_chunk_frames: int = 16
+    stream_chunk_frames: int = OPENMOSS_DEFAULT_STREAM_CHUNK_FRAMES
     default_sample_rate: int = 48_000
     default_channels: int = 2
     sample_width: int = 2

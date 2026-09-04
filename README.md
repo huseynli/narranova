@@ -111,12 +111,11 @@ Docker Compose is the recommended way to run Narranova. You need:
 - Docker Engine with the Compose plugin
 - A separately running OpenMOSS server reachable from the container
 
-Clone the repository, copy the example configuration, and start the service:
+Clone the repository and start the service:
 
 ```console
 git clone https://github.com/huseynli/NarraNova.git
 cd NarraNova
-cp .env.example .env
 docker compose up --detach --build
 docker compose ps
 ```
@@ -127,38 +126,16 @@ The image includes FFmpeg and FFprobe, runs as an unprivileged user, exposes a
 health check, and stores all persistent state in the `narranova-data` volume at
 `/data`.
 
-### Connect OpenMOSS from Docker
+### Connect OpenMOSS
 
-Open the **Connections** page and add the full OpenMOSS `/tts` URL.
+Install and run [MOSS-TTS](https://github.com/OpenMOSS/MOSS-TTS) with the
+OpenMOSS server project wherever you want to host inference. Then open
+Narranova's **Connections** page and enter a reachable OpenMOSS `/tts` endpoint.
+How the two services are networked is up to your deployment.
 
-If OpenMOSS is running directly on the same machine as Docker, use:
-
-```text
-http://host.docker.internal:8000/tts
-```
-
-The Compose configuration supplies this host alias on Linux and Docker Desktop.
-Do not use `127.0.0.1` for a host service: inside the container that address
-points back to Narranova itself.
-
-On Linux, OpenMOSS must listen on a host interface reachable through the Docker
-bridge, not only on the host's loopback interface. Restrict that listener with
-the host firewall rather than exposing it publicly.
-
-If OpenMOSS runs on another trusted machine, use that machine's hostname or LAN
-address. If it runs in another Compose project, place both services on a shared
-Docker network and use the OpenMOSS service name.
-
-### Docker configuration
-
-Copy `.env.example` to `.env` and adjust these values as needed:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `NARRANOVA_PORT` | `8787` | Port exposed on the Docker host |
-| `NARRANOVA_IMAGE` | `narranova:local` | Local image name and tag |
-| `NARRANOVA_VERSION` | `dev` | Version stored in the image metadata |
-| `TZ` | `UTC` | Container timezone, such as `America/Chicago` |
+The default Compose file builds `narranova:local`, publishes port `8787`, uses
+the `UTC` timezone, and persists `/data` in the `narranova-data` volume. Edit
+`compose.yaml` directly if those defaults do not fit your installation.
 
 Useful commands:
 
@@ -323,8 +300,6 @@ share the same filesystem and you understand the operational implications.
 ### The OpenMOSS connection is red
 
 - Confirm that the URL ends in `/tts` and that OpenMOSS is running.
-- From Docker, use `host.docker.internal` instead of `127.0.0.1` for a service
-  running on the Docker host.
 - Check host firewalls and whether OpenMOSS is listening on an address reachable
   from the container or Narranova machine.
 - Open the connection's benchmark page and use **Test connection** for returned

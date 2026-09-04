@@ -21,8 +21,9 @@ class ContainerDistributionTests(unittest.TestCase):
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 
         self.assertIn("narranova-data:/data", compose)
-        self.assertIn("host.docker.internal:host-gateway", compose)
-        self.assertIn("no-new-privileges:true", compose)
+        self.assertIn('"8787:8787"', compose)
+        self.assertIn("NARRANOVA_DATA_DIR: /data", compose)
+        self.assertNotIn("host.docker.internal", compose)
         self.assertNotIn("openmoss:", compose.lower())
 
 

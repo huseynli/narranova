@@ -155,7 +155,7 @@ class OpenMossProviderTests(unittest.TestCase):
             info = validate_wave(destination)
             self.assertTrue(sent["stream"])
             self.assertEqual(sent["response_format"], "pcm")
-            self.assertEqual(sent["stream_chunk_frames"], 16)
+            self.assertEqual(sent["stream_chunk_frames"], 128)
             self.assertEqual(sent["max_new_tokens"], 6000)
             self.assertEqual(sent["sampling"]["seed"], 42)
             self.assertNotIn("ref_text", sent)
