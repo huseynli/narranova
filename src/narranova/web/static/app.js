@@ -54,6 +54,61 @@ const jobMonitor = document.querySelector("[data-job-monitor]");
 document.querySelectorAll(".chapter-choice input").forEach((choice) => {
   choice.addEventListener("click", (event) => event.stopPropagation());
 });
+
+const planForm = document.querySelector("[data-plan-form]");
+const planStatus = document.querySelector("[data-plan-status]");
+const planNext = document.querySelector("[data-plan-next]");
+let planSaveVersion = 0;
+let planSavePromise = Promise.resolve(true);
+
+function setPlanStatus(message, state = "") {
+  if (!planStatus) return;
+  planStatus.textContent = message;
+  planStatus.dataset.state = state;
+}
+
+if (planForm) {
+  planForm.addEventListener("submit", (event) => event.preventDefault());
+  planForm.addEventListener("change", (event) => {
+    if (!event.target.matches('.chapter-choice input[type="checkbox"]')) return;
+    const version = ++planSaveVersion;
+    const snapshot = new FormData(planForm);
+    setPlanStatus("Saving…", "saving");
+    planNext?.setAttribute("aria-disabled", "true");
+    planSavePromise = planSavePromise.then(async () => {
+      try {
+        const response = await fetch(planForm.action, {
+          method: "POST",
+          body: snapshot,
+          headers: { Accept: "application/json" },
+        });
+        if (!response.ok) throw new Error("Could not save narration choices");
+        const result = await response.json();
+        document.querySelectorAll("[data-plan-revision], [data-plan-workflow-revision]").forEach((element) => {
+          element.textContent = String(result.revision);
+        });
+        const enabledUnits = document.querySelector("[data-plan-enabled-units]");
+        if (enabledUnits) enabledUnits.textContent = String(result.enabled_units);
+        if (version === planSaveVersion) {
+          setPlanStatus("Saved automatically", "saved");
+          planNext?.removeAttribute("aria-disabled");
+        }
+        return true;
+      } catch (error) {
+        if (version === planSaveVersion) {
+          setPlanStatus("Save failed · try the toggle again", "error");
+          planNext?.removeAttribute("aria-disabled");
+        }
+        return false;
+      }
+    });
+  });
+  planNext?.addEventListener("click", async (event) => {
+    event.preventDefault();
+    const destination = planNext.href;
+    if (await planSavePromise) window.location.assign(destination);
+  });
+}
 const benchmarkMonitor = document.querySelector("[data-benchmark-monitor]");
 
 function setJobControl(name, visible) {
@@ -305,13 +360,7 @@ if (benchmarkMonitor) {
       if (state.status === "running") {
         window.setTimeout(pollBenchmark, 1500);
       } else {
-        const title = benchmarkMonitor.querySelector("strong");
-        if (title) title.textContent = state.status === "completed"
-          ? "Benchmark complete"
-          : "Benchmark stopped";
-        if (progress && state.error) progress.textContent = state.error;
-        const refresh = benchmarkMonitor.querySelector("[data-benchmark-refresh]");
-        if (refresh) refresh.hidden = false;
+        window.location.replace(benchmarkMonitor.dataset.resultsUrl);
       }
     } catch (error) {
       window.setTimeout(pollBenchmark, 3000);

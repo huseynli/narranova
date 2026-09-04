@@ -23,6 +23,7 @@ def request(
     cookie: str = "",
     content_type: str = "application/x-www-form-urlencoded",
     range_header: str = "",
+    accept: str = "",
 ):
     captured: dict[str, object] = {}
     path_info, separator, query_string = path.partition("?")
@@ -40,6 +41,7 @@ def request(
         "wsgi.input": io.BytesIO(body),
         "HTTP_COOKIE": cookie,
         "HTTP_RANGE": range_header,
+        "HTTP_ACCEPT": accept,
     }
     content = b"".join(app(environ, start_response))
     return str(captured["status"]), list(captured["headers"]), content
@@ -107,6 +109,10 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"narranova_theme=", script)
             self.assertIn(b"data-job-monitor", script)
             self.assertIn(b"window.setTimeout(pollJob", script)
+            self.assertIn(b"data-plan-form", script)
+            self.assertIn(b"planSavePromise", script)
+            self.assertIn(b'Accept: "application/json"', script)
+            self.assertIn(b"window.location.replace(benchmarkMonitor.dataset.resultsUrl)", script)
             self.assertIn(b'Regenerate', script)
             self.assertNotIn(b"location.reload", script)
             self.assertIn(("Content-Type", "text/javascript; charset=utf-8"), headers)
@@ -200,7 +206,10 @@ class WebAppTests(unittest.TestCase):
             token = cookie.split(";", 1)[0].split("=", 1)[1]
             self.assertIn(b"Choose what to narrate", page)
             self.assertIn(b'name="chapter_1" checked', page)
-            self.assertEqual(page.count(b">Save choices</button>"), 1)
+            self.assertNotIn(b"Save choices", page)
+            self.assertIn(b"Changes save automatically", page)
+            self.assertIn(b"data-plan-form", page)
+            self.assertIn(b"data-plan-next", page)
             self.assertEqual(page.count(b"/narrations/new"), 1)
             self.assertNotIn(b"Manage voice profiles", page)
             self.assertNotIn(b"available voices", page)
@@ -209,16 +218,24 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"Set up narration", page)
             body = urlencode({"csrf": token, "chapter_2": "on"}).encode()
 
-            status, response_headers, _ = request(
+            status, response_headers, response_body = request(
                 app,
                 f"/books/{imported.book_id}/plan",
                 method="POST",
                 body=body,
                 cookie=cookie,
+                accept="application/json",
             )
 
-            self.assertEqual(status, "303 See Other")
-            self.assertIn("revision+2", next(v for n, v in response_headers if n == "Location"))
+            self.assertEqual(status, "200 OK")
+            self.assertIn(
+                ("Content-Type", "application/json; charset=utf-8"),
+                response_headers,
+            )
+            saved = json.loads(response_body)
+            self.assertEqual(saved["revision"], 2)
+            self.assertEqual(saved["enabled_chapters"], 1)
+            self.assertTrue(saved["changed"])
             self.assertEqual(app.books.get_plan_record(imported.book_id)["revision"], 2)
             provider_id = app.profiles.add_openmoss_provider(
                 "Plan MOSS", "http://moss.test:8000/tts"
@@ -235,12 +252,30 @@ class WebAppTests(unittest.TestCase):
             make_epub(source)
             app = create_web_app(root / "data")
             imported = app.import_book.execute(source)
+            provider_id = app.profiles.add_openmoss_provider(
+                "Delete MOSS", "http://moss.test:8000/tts"
+            )
+            job_id = app.jobs.create(imported.book_id, "builtin:04", provider_id)
+            app.generation.complete_job(job_id)
+            audiobook = app.layout.job_audiobook(imported.book_id, job_id)
+            audiobook.parent.mkdir(parents=True, exist_ok=True)
+            audiobook.write_bytes(b"generated audiobook")
+            app.generation.record_artifact(
+                book_id=imported.book_id,
+                job_id=job_id,
+                kind="audiobook",
+                relative_path=audiobook.relative_to(app.layout.root).as_posix(),
+                sha256=app.store.sha256(audiobook),
+                byte_size=audiobook.stat().st_size,
+                metadata={"duration_seconds": 1.0},
+            )
 
             status, headers, page = request(app, f"/books/{imported.book_id}/delete")
             cookie = next(value for name, value in headers if name == "Set-Cookie")
             token = cookie.split(";", 1)[0].split("=", 1)[1]
             self.assertEqual(status, "200 OK")
-            self.assertIn(b"Delete book permanently", page)
+            self.assertIn(b"Delete book and audio", page)
+            self.assertIn(b"1 generated audiobook", page)
             self.assertIn(b"This permanently deletes", page)
 
             status, response_headers, _ = request(
@@ -257,6 +292,9 @@ class WebAppTests(unittest.TestCase):
                 "/?notice=Book+deleted",
             )
             self.assertEqual(app.books.list_books(), [])
+            self.assertFalse(audiobook.exists())
+            with self.assertRaises(KeyError):
+                app.generation.get_job(job_id)
 
     def test_connections_and_voice_studio_have_dedicated_pages(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -497,6 +535,13 @@ class WebAppTests(unittest.TestCase):
             )
             run = app.benchmarks.repository.get_run(started[0])
             self.assertEqual(run.requested_frames, (16, 32, 64, 128, 256, 512))
+            status, _, running_page = request(
+                app, f"/connections/{provider_id}/benchmark"
+            )
+            self.assertEqual(status, "200 OK")
+            self.assertIn(b"data-benchmark-monitor", running_page)
+            self.assertIn(b"data-results-url", running_page)
+            self.assertNotIn(b"View results", running_page)
             status, _, state_body = request(
                 app,
                 f"/connections/{provider_id}/benchmarks/{run.id}/status",
@@ -606,7 +651,7 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"data-job-start hidden", job_page)
             self.assertIn(b"data-job-pause", job_page)
             self.assertIn(b"data-job-pause-chapter", job_page)
-            self.assertIn(b"Stop after chapter", job_page)
+            self.assertIn(b"Pause after chapter", job_page)
             self.assertIn(download_path.encode(), job_page)
             self.assertIn(b'class="chunk-action-links"', job_page)
             self.assertIn(

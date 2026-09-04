@@ -8,6 +8,16 @@
   border-bottom: 1px solid var(--line);
 }
 .section-help { max-width: 580px; margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.auto-save-status {
+  color: var(--muted);
+  font: 800 10px ui-monospace, monospace;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.auto-save-status[data-state="saving"] { color: var(--accent-dark); }
+.auto-save-status[data-state="saved"] { color: var(--moss-solid); }
+.auto-save-status[data-state="error"] { color: var(--danger); }
+[data-plan-next][aria-disabled="true"] { opacity: .62; }
 .chapter { border-bottom: 1px solid var(--line); }
 .chapter:last-of-type { border-bottom: 0; }
 .chapter summary {

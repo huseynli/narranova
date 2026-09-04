@@ -455,7 +455,7 @@ pending -> generating -> completed
 Rules:
 
 - `Pause` lets the active request finish and pauses before the next chunk.
-- `Stop after chapter` finishes every remaining chunk in the active chapter,
+- `Pause after chapter` finishes every remaining chunk in the active chapter,
   then pauses before the first chunk of the next included chapter.
 - `Stop now` attempts to abort the active request, removes only its incomplete
   temporary output, and returns that chunk to `pending`.

@@ -418,6 +418,17 @@ class NarranovaWebApp:
                 return self._artifact_download(start_response, parts[1], parts[3])
             if method == "GET" and len(parts) == 3 and parts[0] == "books" and parts[2] == "delete":
                 book = self.books.get_book(parts[1])
+                book_jobs = self.generation.list_jobs(parts[1])
+                audiobook_count = sum(
+                    artifact.kind == "audiobook"
+                    for job in book_jobs
+                    for artifact in self.generation.list_job_artifacts(job.id)
+                )
+                audiobook_label = (
+                    "1 generated audiobook"
+                    if audiobook_count == 1
+                    else f"{audiobook_count} generated audiobooks"
+                )
                 return self._html(
                     start_response,
                     self._confirm(
@@ -425,10 +436,10 @@ class NarranovaWebApp:
                         csrf,
                         title="Delete book",
                         subject=book.title,
-                        warning="This permanently deletes the source EPUB, narration plans, every job, and all generated audio for this book. Reusable voice profiles remain available.",
+                        warning=f"This permanently deletes the source EPUB, narration plans, every job, {audiobook_label}, and all generated chunk audio for this book. Reusable voice profiles remain available.",
                         action=f"/books/{self._e(parts[1])}/delete",
                         cancel=f"/books/{self._e(parts[1])}",
-                        button="Delete book permanently",
+                        button="Delete book and audio",
                     ),
                     set_cookie,
                 )
@@ -499,7 +510,14 @@ class NarranovaWebApp:
                 try:
                     if not secrets.compare_digest(fields.get("csrf", ""), csrf):
                         raise PermissionError("The form expired. Refresh the page and try again.")
-                    return self._post(start_response, parts, fields, uploads)
+                    return self._post(
+                        start_response,
+                        parts,
+                        fields,
+                        uploads,
+                        wants_json="application/json"
+                        in str(environ.get("HTTP_ACCEPT", "")),
+                    )
                 finally:
                     for upload in uploads.values():
                         upload.path.unlink(missing_ok=True)
@@ -517,6 +535,8 @@ class NarranovaWebApp:
         parts: list[str],
         fields: dict[str, str],
         uploads: dict[str, Upload],
+        *,
+        wants_json: bool = False,
     ) -> Iterable[bytes]:
         if parts == ["actions", "import"]:
             upload = uploads.get("epub")
@@ -680,6 +700,21 @@ class NarranovaWebApp:
                 if name.startswith("chapter_") and value == "on"
             }
             result = self.revise_plan.execute(parts[1], enabled)
+            if wants_json:
+                content = json.dumps(
+                    {
+                        "revision": result.revision,
+                        "enabled_chapters": result.enabled_chapters,
+                        "enabled_units": result.enabled_units,
+                        "changed": result.changed,
+                    }
+                ).encode("utf-8")
+                return self._respond(
+                    start_response,
+                    "200 OK",
+                    content,
+                    "application/json; charset=utf-8",
+                )
             notice = (
                 f"Narration+choices+saved+as+revision+{result.revision}"
                 if result.changed
@@ -704,7 +739,7 @@ class NarranovaWebApp:
             self.generation.request_pause_after_chapter(parts[1])
             return self._redirect(
                 start_response,
-                f"/jobs/{parts[1]}?notice=Stop+after+chapter+requested",
+                f"/jobs/{parts[1]}?notice=Pause+after+chapter+requested",
             )
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "assemble":
             started = self.supervisor.assemble(parts[1])
@@ -871,7 +906,7 @@ class NarranovaWebApp:
         monitor = ""
         if active:
             current = active.active_stream_chunk_frames
-            monitor = f"""<section class="panel benchmark-monitor" data-benchmark-monitor data-status-url="/connections/{self._e(provider_id)}/benchmarks/{self._e(active.id)}/status"><div class="benchmark-pulse"><i></i><div><strong>Benchmark running</strong><span data-benchmark-progress>{len(active.results)} of {len(active.requested_frames)} measurements complete{f' · testing {current} frames' if current else ''}</span></div></div><a class="button" data-benchmark-refresh hidden href="/connections/{self._e(provider_id)}/benchmark">View results</a></section>"""
+            monitor = f"""<section class="panel benchmark-monitor" data-benchmark-monitor data-status-url="/connections/{self._e(provider_id)}/benchmarks/{self._e(active.id)}/status" data-results-url="/connections/{self._e(provider_id)}/benchmark"><div class="benchmark-pulse"><i></i><div><strong>Benchmark running</strong><span data-benchmark-progress>{len(active.results)} of {len(active.requested_frames)} measurements complete{f' · testing {current} frames' if current else ''}</span></div></div></section>"""
         history = "".join(
             self._benchmark_run_card(provider_id, run, csrf)
             for run in runs
@@ -1146,9 +1181,9 @@ class NarranovaWebApp:
             f'<a class="job-row" href="/jobs/{self._e(job.id)}"><span><strong>Narration {self._e(job.id[:8])}</strong><small>{self._e(job.created_at)}</small></span><span class="status status-{self._e(job.status)}">{self._e(job.status)}</span></a>'
             for job in jobs
         ) or '<div class="empty">No generation job yet.</div>'
-        body = f"""<a class="back" href="/">← Workspace</a><section class="book-head full-page-heading"><div><p class="eyebrow">Book workspace</p><h1>{self._e(book.title)}</h1><p>{self._e(book.author or 'Unknown author')} · {len(plan.chapters)} sections · {enabled_units} of {len(plan.units)} units included</p></div><div class="head-actions"><a class="danger-link" href="/books/{self._e(book_id)}/delete">Delete book</a></div></section>
-        <div class="book-grid"><main><section class="panel"><form class="plan-form" method="post" action="/books/{self._e(book_id)}/plan">{self._csrf(csrf)}<header><div><p class="eyebrow">Narration plan · revision {record['revision']}</p><h2>Choose what to narrate</h2><p class="section-help">Turn off front matter, tables of contents, copyright pages, or any other section you do not want spoken.</p></div><button class="primary">Save choices</button></header>{chapters}<div class="plan-note"><span>Saved changes create a new plan revision for future jobs. Existing jobs keep their original text.</span></div></form></section></main>
-        <aside class="stack"><section class="panel book-workflow"><header><div><p class="eyebrow">New narration</p><h2>Turn this plan into audio</h2></div></header><div class="book-workflow-body"><p>Choose a TTS connection and narrator pair for a new job using plan revision {record['revision']}.</p><a class="button primary" href="/books/{self._e(book_id)}/narrations/new">Set up narration</a></div></section><section class="panel"><header><div><p class="eyebrow">Activity</p><h2>Generation jobs</h2></div><span class="count">{len(jobs):02d}</span></header>{job_rows}</section></aside></div>"""
+        body = f"""<a class="back" href="/">← Workspace</a><section class="book-head full-page-heading"><div><p class="eyebrow">Book workspace</p><h1>{self._e(book.title)}</h1><p>{self._e(book.author or 'Unknown author')} · {len(plan.chapters)} sections · <span data-plan-enabled-units>{enabled_units}</span> of {len(plan.units)} units included</p></div><div class="head-actions"><a class="danger-link" href="/books/{self._e(book_id)}/delete">Delete book</a></div></section>
+        <div class="book-grid"><main><section class="panel"><form class="plan-form" method="post" action="/books/{self._e(book_id)}/plan" data-plan-form>{self._csrf(csrf)}<header><div><p class="eyebrow">Narration plan · revision <span data-plan-revision>{record['revision']}</span></p><h2>Choose what to narrate</h2><p class="section-help">Turn off front matter, tables of contents, copyright pages, or any other section you do not want spoken.</p></div><span class="auto-save-status" data-plan-status>Changes save automatically</span></header>{chapters}<div class="plan-note"><span>Every toggle is saved automatically. The current choices will be used by the next narration job; existing jobs keep their original text.</span></div></form></section></main>
+        <aside class="stack"><section class="panel book-workflow"><header><div><p class="eyebrow">New narration</p><h2>Turn this plan into audio</h2></div></header><div class="book-workflow-body"><p>Choose a TTS connection and narrator pair for a new job using plan revision <span data-plan-workflow-revision>{record['revision']}</span>.</p><a class="button primary" data-plan-next href="/books/{self._e(book_id)}/narrations/new">Set up narration</a></div></section><section class="panel"><header><div><p class="eyebrow">Activity</p><h2>Generation jobs</h2></div><span class="count">{len(jobs):02d}</span></header>{job_rows}</section></aside></div>"""
         return self._layout(book.title, body, environ)
 
     def _job(self, job_id: str, environ: dict[str, object], csrf: str) -> str:
@@ -1190,7 +1225,7 @@ class NarranovaWebApp:
             if regenerating
             else "Generation in progress"
         )
-        controls = f"""<form method="post" action="/jobs/{self._e(job_id)}/run" data-job-start{' hidden' if not startable else ''}>{self._csrf(csrf)}<button class="primary" data-job-start-label>{start_label}</button></form><span class="running-mark" data-job-running{' hidden' if status not in {'generating', 'assembling'} else ''}><i></i><b data-job-running-label>{running_label}</b></span><form method="post" action="/jobs/{self._e(job_id)}/pause" data-job-pause{' hidden' if status != 'generating' or regenerating or chapter_pause_requested else ''}>{self._csrf(csrf)}<button>Pause after chunk</button></form><form method="post" action="/jobs/{self._e(job_id)}/pause-chapter" data-job-pause-chapter{' hidden' if status != 'generating' or regenerating or chapter_pause_requested else ''}>{self._csrf(csrf)}<button>Stop after chapter</button></form><span class="pause-mark" data-job-chapter-pause-requested{' hidden' if not chapter_pause_requested else ''}>Stop requested · finishing current chapter</span><span class="pause-mark" data-job-pause-requested{' hidden' if status != 'pause_requested' else ''}>Pause requested · finishing current chunk</span><span class="complete-mark" data-job-complete{' hidden' if status != 'completed' else ''}>✓ Generation complete</span><a class="danger-link job-delete" href="/jobs/{self._e(job_id)}/delete">Delete job</a>"""
+        controls = f"""<form method="post" action="/jobs/{self._e(job_id)}/run" data-job-start{' hidden' if not startable else ''}>{self._csrf(csrf)}<button class="primary" data-job-start-label>{start_label}</button></form><span class="running-mark" data-job-running{' hidden' if status not in {'generating', 'assembling'} else ''}><i></i><b data-job-running-label>{running_label}</b></span><form method="post" action="/jobs/{self._e(job_id)}/pause" data-job-pause{' hidden' if status != 'generating' or regenerating or chapter_pause_requested else ''}>{self._csrf(csrf)}<button>Pause after chunk</button></form><form method="post" action="/jobs/{self._e(job_id)}/pause-chapter" data-job-pause-chapter{' hidden' if status != 'generating' or regenerating or chapter_pause_requested else ''}>{self._csrf(csrf)}<button>Pause after chapter</button></form><span class="pause-mark" data-job-chapter-pause-requested{' hidden' if not chapter_pause_requested else ''}>Pause requested · finishing current chapter</span><span class="pause-mark" data-job-pause-requested{' hidden' if status != 'pause_requested' else ''}>Pause requested · finishing current chunk</span><span class="complete-mark" data-job-complete{' hidden' if status != 'completed' else ''}>✓ Generation complete</span><a class="danger-link job-delete" href="/jobs/{self._e(job_id)}/delete">Delete job</a>"""
         error_message = str(job.get("error_message") or "")
         error = f'<div class="alert" data-job-error{"" if error_message else " hidden"}>{self._e(error_message)}</div>'
         output_rows = self._output_rows(job_id, artifacts)

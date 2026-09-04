@@ -105,15 +105,30 @@ class DeleteArtifactsTests(unittest.TestCase):
             generation = workspace["generation"]
             layout = workspace["layout"]
             deletion = workspace["deletion"]
+            jobs = workspace["jobs"]
             book_id = str(workspace["book_id"])
             job_id = str(workspace["job_id"])
             profile_id = str(workspace["profile_id"])
             profile_root = layout.voice_profile_root(profile_id)  # type: ignore[union-attr]
             book_root = layout.book_root(book_id)  # type: ignore[union-attr]
+            jobs.run(job_id)  # type: ignore[union-attr]
+            audiobook = layout.job_audiobook(book_id, job_id)  # type: ignore[union-attr]
+            audiobook.parent.mkdir(parents=True, exist_ok=True)
+            audiobook.write_bytes(b"completed audiobook")
+            generation.record_artifact(  # type: ignore[union-attr]
+                book_id=book_id,
+                job_id=job_id,
+                kind="audiobook",
+                relative_path=audiobook.relative_to(layout.root).as_posix(),  # type: ignore[union-attr]
+                sha256=ArtifactStore.sha256(audiobook),
+                byte_size=audiobook.stat().st_size,
+                metadata={"duration_seconds": 1.0},
+            )
 
             deletion.book(book_id)  # type: ignore[union-attr]
 
             self.assertFalse(book_root.exists())
+            self.assertFalse(audiobook.exists())
             with self.assertRaises(KeyError):
                 books.get_book(book_id)  # type: ignore[union-attr]
             with self.assertRaises(KeyError):
