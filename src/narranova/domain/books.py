@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class BookMetadata:
     title: str
+    subtitle: str | None = None
     authors: tuple[str, ...] = ()
     language: str | None = None
     identifiers: tuple[str, ...] = ()

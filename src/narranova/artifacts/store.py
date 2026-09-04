@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import time
 from pathlib import Path
 
 
@@ -67,3 +68,22 @@ class ArtifactStore:
             for block in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(block)
         return digest.hexdigest()
+
+    def cleanup_abandoned_partials(self, *, older_than_seconds: float = 21_600) -> int:
+        """Remove stale atomic-write/provider partials, never promoted artifacts."""
+        cutoff = time.time() - older_than_seconds
+        removed = 0
+        if not self.root.is_dir():
+            return removed
+        for path in self.root.rglob(".*"):
+            if not path.is_file() or not any(
+                marker in path.name for marker in (".part", ".tmp")
+            ):
+                continue
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue
+        return removed

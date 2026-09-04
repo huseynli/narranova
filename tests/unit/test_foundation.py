@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -44,6 +45,25 @@ class ArtifactLayoutTests(unittest.TestCase):
             layout.book_root("../outside")
         with self.assertRaises(ValueError):
             layout.chunk_master("book-1", "chapter/one")
+
+    def test_stale_partial_cleanup_never_removes_promoted_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stale = root / "tmp" / ".generation-job-chunk.wav.part"
+            final = root / "books" / "book" / "chunk.flac"
+            stale.parent.mkdir(parents=True)
+            final.parent.mkdir(parents=True)
+            stale.write_bytes(b"partial")
+            final.write_bytes(b"complete")
+            os.utime(stale, (1, 1))
+
+            removed = ArtifactStore(root).cleanup_abandoned_partials(
+                older_than_seconds=1
+            )
+
+            self.assertEqual(removed, 1)
+            self.assertFalse(stale.exists())
+            self.assertTrue(final.exists())
 
 
 class ProviderContractTests(unittest.TestCase):
@@ -165,6 +185,8 @@ class DatabaseTests(unittest.TestCase):
                     (6, "job_storage"),
                     (8, "connection_performance"),
                     (9, "chapter_pause"),
+                    (10, "work_leases"),
+                    (11, "chunk_attempts"),
                 ],
             )
             self.assertTrue(

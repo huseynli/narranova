@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -61,9 +63,27 @@ class AudioAssembler:
         self.encoder = encoder or FFmpegM4BEncoder()
         self.epub_parser = epub_parser or EpubParser()
         self.masters = masters or FFmpegAudioMasters()
+        self._claim_lock = threading.Lock()
+        self._claim_owners: dict[str, str] = {}
+        self._heartbeat_stops: dict[str, threading.Event] = {}
 
     def prepare(self, job_id: str) -> None:
-        self.generation.begin_assembly(job_id)
+        owner_id = uuid.uuid4().hex
+        self.generation.claim_assembly_work(job_id, owner_id)
+        with self._claim_lock:
+            self._claim_owners[job_id] = owner_id
+            stop = threading.Event()
+            self._heartbeat_stops[job_id] = stop
+        threading.Thread(
+            target=self._heartbeat,
+            args=(job_id, owner_id, stop),
+            daemon=True,
+        ).start()
+        try:
+            self.generation.begin_assembly(job_id)
+        except Exception:
+            self._release_claim(job_id)
+            raise
 
     def run(self, job_id: str, *, prepared: bool = False) -> AssemblyResult:
         if not prepared:
@@ -75,8 +95,11 @@ class AudioAssembler:
         except Exception as exc:
             self.generation.fail_job(job_id, str(exc))
             raise
+        finally:
+            self._release_claim(job_id)
 
     def _assemble(self, job_id: str) -> AssemblyResult:
+        self._renew_claim(job_id)
         job = self.generation.get_job(job_id)
         plan_path = self._artifact(str(job["plan_artifact_path"]))
         if self.store.sha256(plan_path) != job["plan_sha256"]:
@@ -166,6 +189,31 @@ class AudioAssembler:
         return AssemblyResult(
             len(encoded_chapters), encoded_duration, audiobook_path, narration_map_path
         )
+
+    def _renew_claim(self, job_id: str) -> None:
+        with self._claim_lock:
+            owner_id = self._claim_owners.get(job_id)
+        if owner_id is None:
+            raise RuntimeError("Audiobook job has no active worker lease")
+        self.generation.renew_assembly_work(job_id, owner_id)
+
+    def _release_claim(self, job_id: str) -> None:
+        with self._claim_lock:
+            owner_id = self._claim_owners.pop(job_id, None)
+            stop = self._heartbeat_stops.pop(job_id, None)
+        if stop is not None:
+            stop.set()
+        if owner_id is not None:
+            self.generation.release_job_work(job_id, owner_id)
+
+    def _heartbeat(
+        self, job_id: str, owner_id: str, stop: threading.Event
+    ) -> None:
+        while not stop.wait(60):
+            try:
+                self.generation.renew_assembly_work(job_id, owner_id)
+            except Exception:
+                return
 
     def _verified_chunk(self, chunk: StoredChunk) -> AudioMasterInfo:
         if not chunk.audio_artifact_path or not chunk.audio_sha256:
@@ -334,6 +382,15 @@ class AudioAssembler:
         identifiers = metadata.get("identifiers") or []
         if identifiers:
             result["isbn"] = str(identifiers[0])
+        for source, target in (
+            ("subtitle", "subtitle"),
+            ("publisher", "publisher"),
+            ("description", "description"),
+            ("series", "series"),
+            ("series_index", "episode_sort"),
+        ):
+            if metadata.get(source):
+                result[target] = str(metadata[source])
         return result
 
     def _artifact(self, relative_path: str) -> Path:

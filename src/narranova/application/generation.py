@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
@@ -23,6 +25,7 @@ from narranova.persistence.generation import GenerationRepository
 from narranova.providers import (
     OpenMossConfig,
     OpenMossProvider,
+    SynthesisCancelled,
     SynthesisRequest,
     TTSProvider,
     normalize_openmoss_sampling,
@@ -257,6 +260,7 @@ class GenerationJobs:
         store: ArtifactStore,
         provider_factory: Callable[[dict[str, object]], TTSProvider] | None = None,
         masters: AudioMasters | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self.books = books
         self.generation = generation
@@ -264,8 +268,12 @@ class GenerationJobs:
         self.store = store
         self.provider_factory = provider_factory or self._openmoss_provider
         self.masters = masters or FFmpegAudioMasters()
+        self.sleeper = sleeper
+        self._claim_lock = threading.Lock()
+        self._claim_owners: dict[str, str] = {}
         self._materialize_job_voice_references()
         self._reset_legacy_reused_chunks()
+        self._remove_stale_replacement_candidates()
 
     def create(
         self,
@@ -353,14 +361,28 @@ class GenerationJobs:
 
     def prepare(self, job_id: str) -> None:
         """Put a job into a visible running state before background execution."""
-        self.generation.resume(job_id)
-        self.generation.recover_interrupted(job_id)
-        self._remove_abandoned_provider_audio(job_id)
-        self.generation.start_job(job_id)
+        owner_id = uuid.uuid4().hex
+        self.generation.claim_job_work(job_id, owner_id)
+        with self._claim_lock:
+            self._claim_owners[job_id] = owner_id
+        try:
+            self.generation.resume(job_id)
+            self.generation.recover_interrupted(job_id)
+            self._remove_abandoned_provider_audio(job_id)
+            self.generation.start_job(job_id)
+        except Exception:
+            self._release_claim(job_id)
+            raise
 
     def run(self, job_id: str, *, prepared: bool = False) -> None:
         if not prepared:
             self.prepare(job_id)
+        try:
+            self._run_prepared(job_id)
+        finally:
+            self._release_claim(job_id)
+
+    def _run_prepared(self, job_id: str) -> None:
         job = self.generation.get_job(job_id)
         profile = job["profile"]
         if hashlib.sha256(_canonical_json(profile).encode("utf-8")).hexdigest() != job[
@@ -372,6 +394,10 @@ class GenerationJobs:
             raise RuntimeError("Voice reference failed hash validation")
         provider = self.provider_factory(job)
         for chunk in self.generation.list_chunks(job_id):
+            self._renew_claim(job_id)
+            if self.generation.cancellation_requested(job_id):
+                self.generation.complete_cancellation(job_id)
+                return
             if self.generation.job_status(job_id) == "pause_requested":
                 self.generation.mark_paused(job_id)
                 return
@@ -397,8 +423,7 @@ class GenerationJobs:
             )
             self.generation.begin_chunk(job_id, chunk.database_id)
             try:
-                result = provider.synthesize(
-                    SynthesisRequest(
+                request = SynthesisRequest(
                         text=text,
                         destination=provider_output,
                         language=profile.get("language"),
@@ -408,7 +433,12 @@ class GenerationJobs:
                             str(job["book_id"]), chunk.chapter_index, chunk.chunk_index
                         ),
                         parameters=dict(profile.get("sampling") or {}),
+                        cancel_requested=lambda: self.generation.cancellation_requested(
+                            job_id
+                        ),
                     )
+                result = self._synthesize_with_retries(
+                    provider, request, job_id, chunk.database_id
                 )
                 if result.audio_path.resolve() != provider_output.resolve():
                     raise RuntimeError("TTS provider returned an unexpected audio path")
@@ -423,10 +453,18 @@ class GenerationJobs:
                     destination.relative_to(self.layout.root).as_posix(),
                     master_hash,
                     master.duration_seconds,
+                    provider_request_id=result.provider_request_id,
+                    usage=dict(result.usage),
                 )
                 if replacing_completed_audio:
                     self._invalidate_outputs(job_id, chunk.chapter_index)
+            except SynthesisCancelled:
+                self.generation.complete_cancellation(job_id, chunk.database_id)
+                return
             except Exception as exc:
+                if self.generation.cancellation_requested(job_id):
+                    self.generation.complete_cancellation(job_id, chunk.database_id)
+                    return
                 self.generation.fail_chunk(job_id, chunk.database_id, str(exc))
                 raise
             finally:
@@ -437,7 +475,15 @@ class GenerationJobs:
         chunk = self.generation.get_chunk(job_id, chunk_id)
         if chunk.status != "completed" or not self._completed_chunk_is_valid(chunk):
             raise ValueError("Only a verified, completed audio chunk can be regenerated")
-        self.generation.begin_chunk_regeneration(job_id, chunk_id)
+        owner_id = uuid.uuid4().hex
+        self.generation.claim_job_work(job_id, owner_id)
+        with self._claim_lock:
+            self._claim_owners[job_id] = owner_id
+        try:
+            self.generation.begin_chunk_regeneration(job_id, chunk_id)
+        except Exception:
+            self._release_claim(job_id)
+            raise
 
     def regenerate_chunk(
         self, job_id: str, chunk_id: str, *, prepared: bool = False
@@ -445,13 +491,24 @@ class GenerationJobs:
         """Replace one chunk atomically while leaving every other chunk untouched."""
         if not prepared:
             self.prepare_chunk_regeneration(job_id, chunk_id)
+        try:
+            self._regenerate_chunk_prepared(job_id, chunk_id)
+        finally:
+            self._release_claim(job_id)
+
+    def _regenerate_chunk_prepared(self, job_id: str, chunk_id: str) -> None:
+        self._renew_claim(job_id)
         job = self.generation.get_job(job_id)
         chunk = self.generation.get_chunk(job_id, chunk_id)
         profile = job["profile"]
-        destination = self.layout.job_chunk_master(job["book_id"], job_id, chunk.id)
+        previous_destination = self._artifact_path(str(chunk.audio_artifact_path))
+        destination = self.layout.job_chunk_replacement(
+            job["book_id"], job_id, chunk.id, uuid.uuid4().hex
+        )
         provider_output = self.layout.job_chunk_temporary(
             job_id, chunk.id, uuid.uuid4().hex
         )
+        committed = False
         try:
             if hashlib.sha256(_canonical_json(profile).encode("utf-8")).hexdigest() != job[
                 "profile_sha256"
@@ -490,7 +547,12 @@ class GenerationJobs:
                 destination.relative_to(self.layout.root).as_posix(),
                 regenerated_hash,
                 master.duration_seconds,
+                provider_request_id=result.provider_request_id,
+                usage=dict(result.usage),
             )
+            committed = True
+            if previous_destination != destination:
+                previous_destination.unlink(missing_ok=True)
             self._invalidate_outputs(job_id, chunk.chapter_index)
             self.generation.finish_chunk_regeneration(job_id)
         except Exception as exc:
@@ -498,6 +560,8 @@ class GenerationJobs:
             raise
         finally:
             provider_output.unlink(missing_ok=True)
+            if not committed:
+                destination.unlink(missing_ok=True)
 
     def _invalidate_outputs(self, job_id: str, chapter_index: int) -> None:
         for relative_path in self.generation.invalidate_job_outputs(
@@ -564,6 +628,66 @@ class GenerationJobs:
                 path.unlink(missing_ok=True)
             except OSError:
                 pass
+        for path in self.layout.temporary_root.glob(
+            f".generation-{safe_job_id}-*.wav.part"
+        ):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _synthesize_with_retries(
+        self,
+        provider: TTSProvider,
+        request: SynthesisRequest,
+        job_id: str,
+        chunk_id: str,
+    ) -> object:
+        for retry in range(3):
+            try:
+                return provider.synthesize(request)
+            except SynthesisCancelled:
+                raise
+            except Exception as exc:
+                if retry == 2 or not self._retryable_provider_error(exc):
+                    raise
+                self.generation.record_chunk_attempt_failure(
+                    job_id, chunk_id, str(exc)
+                )
+                self.sleeper(2**retry)
+                if self.generation.cancellation_requested(job_id):
+                    raise SynthesisCancelled("Synthesis was cancelled") from exc
+                self.generation.begin_chunk(job_id, chunk_id)
+                self._renew_claim(job_id)
+        raise AssertionError("Retry loop did not return or raise")
+
+    @staticmethod
+    def _retryable_provider_error(error: Exception) -> bool:
+        message = str(error).lower()
+        return any(
+            marker in message
+            for marker in (
+                "could not connect",
+                "timed out",
+                "timeout",
+                "temporarily",
+                "http 408",
+                "http 429",
+                "http 5",
+            )
+        )
+    def _renew_claim(self, job_id: str) -> None:
+        with self._claim_lock:
+            owner_id = self._claim_owners.get(job_id)
+        if owner_id is None:
+            raise RuntimeError("Generation job has no active worker lease")
+        self.generation.renew_job_work(job_id, owner_id)
+
+    def _release_claim(self, job_id: str) -> None:
+        with self._claim_lock:
+            owner_id = self._claim_owners.pop(job_id, None)
+        if owner_id is not None:
+            self.generation.release_job_work(job_id, owner_id)
 
     def _valid_reference(self, path: Path, expected_hash: str) -> bool:
         try:
@@ -571,6 +695,18 @@ class GenerationJobs:
             return self.store.sha256(path) == expected_hash
         except (OSError, ValueError):
             return False
+
+    def _remove_stale_replacement_candidates(self) -> None:
+        referenced = self.generation.referenced_chunk_audio_paths()
+        cutoff = time.time() - 21_600
+        pattern = "*-????????????????????????????????.flac"
+        for path in self.layout.books_root.glob(f"*/jobs/*/chunks/{pattern}"):
+            try:
+                relative = path.relative_to(self.layout.root).as_posix()
+                if relative not in referenced and path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                continue
 
     def _reset_legacy_reused_chunks(self) -> None:
         """Remove cross-job copies created without a synthesis attempt.

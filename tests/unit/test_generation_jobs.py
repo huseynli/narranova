@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from unittest.mock import patch
 
 from narranova.application.generation import (
     GenerationJobs,
@@ -20,7 +21,11 @@ from narranova.persistence import Database
 from narranova.persistence.benchmarks import BenchmarkRepository
 from narranova.persistence.books import BookRepository
 from narranova.persistence.generation import GenerationRepository
-from narranova.providers.base import SynthesisRequest, SynthesisResult
+from narranova.providers.base import (
+    SynthesisCancelled,
+    SynthesisRequest,
+    SynthesisResult,
+)
 from tests.unit.test_epub_ingest import make_epub
 
 
@@ -74,6 +79,94 @@ class FakeAudioMasters:
 
 
 class GenerationJobTests(unittest.TestCase):
+    def test_transient_failures_retry_and_cancellation_discards_active_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            source = root / "book.epub"
+            reference = root / "reference.wav"
+            make_epub(source)
+            make_wave(reference)
+            layout = ArtifactLayout.at(data)
+            layout.initialize()
+            store = ArtifactStore(data)
+            database = Database(data / "narranova.sqlite3")
+            database.initialize()
+            books = BookRepository(database)
+            generation = GenerationRepository(database)
+            imported = ImportBook(EpubParser(), books, layout, store).execute(source)
+            profiles = VoiceProfiles(generation, layout, store)
+            provider_id = profiles.add_openmoss_provider(
+                "Test MOSS", "http://moss.test:8000/tts"
+            )
+            profile_id = profiles.create_openmoss_profile(
+                provider_id=provider_id,
+                reference_audio=reference,
+                instruction="A steady narrator.",
+                name="Steady narrator",
+            )
+
+            class FlakyProvider(FakeProvider):
+                def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
+                    if len(self.requests) < 2:
+                        self.requests.append(request)
+                        raise RuntimeError("Could not connect to OpenMOSS")
+                    return super().synthesize(request)
+
+            delays: list[float] = []
+            flaky = FlakyProvider()
+            jobs = GenerationJobs(
+                books,
+                generation,
+                layout,
+                store,
+                provider_factory=lambda job: flaky,
+                masters=FakeAudioMasters(),
+                sleeper=delays.append,
+            )
+            retry_job = jobs.create(imported.book_id, profile_id)
+            jobs.run(retry_job)
+            self.assertEqual(delays, [1, 2])
+            self.assertEqual(generation.list_chunks(retry_job)[0].attempts, 3)
+            with database.connect() as connection:
+                attempt_states = connection.execute(
+                    "SELECT status FROM chunk_attempts WHERE chunk_id = ? "
+                    "ORDER BY attempt_number",
+                    (generation.list_chunks(retry_job)[0].database_id,),
+                ).fetchall()
+            self.assertEqual(
+                [row[0] for row in attempt_states],
+                ["failed", "failed", "completed"],
+            )
+
+            holder: dict[str, str] = {}
+
+            class CancellingProvider(FakeProvider):
+                def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
+                    generation.request_cancel(holder["job_id"])
+                    if request.cancel_requested and request.cancel_requested():
+                        raise SynthesisCancelled("cancelled")
+                    raise AssertionError("Cancellation callback was not supplied")
+
+            cancelling = CancellingProvider()
+            cancel_jobs = GenerationJobs(
+                books,
+                generation,
+                layout,
+                store,
+                provider_factory=lambda job: cancelling,
+                masters=FakeAudioMasters(),
+            )
+            holder["job_id"] = cancel_jobs.create(imported.book_id, profile_id)
+            cancel_jobs.run(holder["job_id"])
+            self.assertEqual(generation.job_status(holder["job_id"]), "cancelled")
+            self.assertTrue(
+                all(
+                    chunk.status == "pending"
+                    for chunk in generation.list_chunks(holder["job_id"])
+                )
+            )
+
     def test_chunk_seed_is_stable_distinct_and_openmoss_safe(self) -> None:
         first = deterministic_chunk_seed("book-a", 1, 2)
 
@@ -383,6 +476,23 @@ class GenerationJobTests(unittest.TestCase):
                 all(request.seed == selected_seed for request in fake.requests[len(chunks):])
             )
 
+            stable = generation.get_chunk(job_id, selected.database_id)
+            stable_path = data / str(stable.audio_artifact_path)
+            stable_audio = stable_path.read_bytes()
+            with patch.object(
+                generation,
+                "complete_chunk",
+                side_effect=RuntimeError("database commit failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "database commit failed"):
+                    jobs.regenerate_chunk(job_id, selected.database_id)
+            after_commit_failure = generation.get_chunk(job_id, selected.database_id)
+            self.assertEqual(
+                after_commit_failure.audio_artifact_path,
+                stable.audio_artifact_path,
+            )
+            self.assertEqual(stable_path.read_bytes(), stable_audio)
+
     def test_legacy_zero_attempt_audio_is_removed_and_job_is_reopened(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -496,6 +606,17 @@ class GenerationJobTests(unittest.TestCase):
                     "INSERT INTO chunks(id, logical_id, job_id, chapter_index, chunk_index, "
                     "text_sha256, text_artifact_path, status) "
                     "VALUES ('j-c', 'c', 'j', 2, 1, 'hash', 'text.txt', 'generating')"
+                )
+
+            generation.claim_job_work("j", "live-worker")
+            self.assertEqual(generation.recover_interrupted_jobs(), 0)
+            self.assertEqual(generation.get_job("j")["status"], "generating")
+            with database.connect() as connection:
+                connection.execute(
+                    "UPDATE jobs SET lease_expires_at = 0 WHERE id = 'j'"
+                )
+                connection.execute(
+                    "UPDATE provider_work_leases SET lease_expires_at = 0"
                 )
 
             self.assertEqual(generation.recover_interrupted_jobs(), 1)

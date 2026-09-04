@@ -44,6 +44,7 @@ def _services(
     layout.initialize()
     database = Database(settings.database_path)
     database.initialize()
+    ArtifactStore(settings.data_dir).cleanup_abandoned_partials()
     return settings, layout, BookRepository(database), GenerationRepository(database)
 
 
@@ -114,6 +115,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pause_parser.add_argument("job_id")
     pause_parser.add_argument("--data-dir", help="persistent data directory")
+
+    cancel_parser = commands.add_parser(
+        "job-cancel", help="stop generation and discard the active partial chunk"
+    )
+    cancel_parser.add_argument("job_id")
+    cancel_parser.add_argument("--data-dir", help="persistent data directory")
 
     assemble_parser = commands.add_parser(
         "job-assemble", help="build chapter audio, narration map, and M4B"
@@ -233,6 +240,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "job-pause":
             generation_repository.request_pause(args.job_id)
             print(f"Pause requested for generation job {args.job_id}")
+            return 0
+        if args.command == "job-cancel":
+            generation_repository.request_cancel(args.job_id)
+            print(f"Cancellation requested for generation job {args.job_id}")
             return 0
         if args.command == "job-assemble":
             result = AudioAssembler(

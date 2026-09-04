@@ -219,6 +219,11 @@ class AudioAssemblerTests(unittest.TestCase):
             )
             assembler.prepare(job_id)
 
+            self.assertEqual(generation.recover_interrupted_assemblies(), 0)
+            with generation.database.connect() as connection:
+                connection.execute(
+                    "UPDATE jobs SET lease_expires_at = 0 WHERE id = ?", (job_id,)
+                )
             recovered = generation.recover_interrupted_assemblies()
 
             self.assertEqual(recovered, 1)
@@ -290,13 +295,10 @@ class M4BMetadataTests(unittest.TestCase):
             self.assertEqual(encoded.duration_seconds, 0.02)
             self.assertEqual(destination.read_bytes(), b"encoded")
             ffmpeg_command = commands[0]
-            self.assertIn("-filter_complex", ffmpeg_command)
-            self.assertTrue(
-                any(
-                    "concat=n=2:v=0:a=1[audiobook]" in argument
-                    for argument in ffmpeg_command
-                )
-            )
+            self.assertIn("concat", ffmpeg_command)
+            self.assertNotIn("-filter_complex", ffmpeg_command)
+            manifest = root / "workspace" / "audio.ffconcat"
+            self.assertEqual(manifest.read_text().count("\nfile '"), 2)
             self.assertIn("-map_chapters", ffmpeg_command)
             self.assertIn("attached_pic", ffmpeg_command)
             self.assertIn("-f", ffmpeg_command)

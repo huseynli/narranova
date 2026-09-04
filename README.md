@@ -80,7 +80,8 @@ PYTHONPATH=src python -m narranova job-status JOB_ID --data-dir ./data
 Running `job-run` again resumes pending or failed work and skips completed FLAC
 masters whose hashes and audio streams still validate. From another shell,
 `job-pause JOB_ID` requests a pause after the current provider request finishes;
-running `job-run JOB_ID` resumes it.
+running `job-run JOB_ID` resumes it. `job-cancel JOB_ID` requests an immediate
+stop, discards the active partial response, and keeps already verified chunks.
 
 After every chunk is complete, build and inspect the final deliverables:
 
@@ -135,6 +136,11 @@ background generation, pause/resume, status, verified FLAC chunk playback,
 pause-after-chapter, selective chunk regeneration, direct M4B assembly,
 storage finalization, and
 final artifact downloads.
+Generation uses durable SQLite leases so separate CLI and web processes cannot
+run the same job—or concurrent requests against the same TTS connection—at the
+same time. Transient connection failures receive bounded retries, and each
+attempt records timing and provider diagnostics. Voice Lab auditions run in the
+background and report completion without blocking the HTTP request.
 VoiceLab's collapsed advanced section exposes optional OpenMOSS sampling controls
 and manual candidate seeds. Audiobook chunks use deterministic per-chunk seeds so
 retries and regeneration remain reproducible without making every chunk identical.

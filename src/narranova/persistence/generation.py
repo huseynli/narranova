@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -170,8 +171,13 @@ class GenerationRepository:
                 "WHERE provider_instance_id = ? AND status = 'running' LIMIT 1",
                 (provider_id,),
             ).fetchone()
-            if benchmark_running:
-                raise ValueError("Wait for the connection benchmark to finish first")
+            work_running = connection.execute(
+                "SELECT 1 FROM provider_work_leases "
+                "WHERE provider_instance_id = ? AND lease_expires_at >= ? LIMIT 1",
+                (provider_id, time.time()),
+            ).fetchone()
+            if benchmark_running or work_running:
+                raise ValueError("Wait for active TTS work to finish first")
             if profile_in_use or job_in_use:
                 raise ValueError(
                     "Delete profiles and generation jobs using this TTS connection first"
@@ -519,6 +525,14 @@ class GenerationRepository:
             ).fetchall()
         return [self._stored_chunk(row) for row in rows]
 
+    def referenced_chunk_audio_paths(self) -> set[str]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT audio_artifact_path FROM chunks "
+                "WHERE audio_artifact_path IS NOT NULL"
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
     @staticmethod
     def _stored_chunk(row: object) -> StoredChunk:
         values = dict(row)
@@ -538,28 +552,193 @@ class GenerationRepository:
                 (job_id,),
             )
 
-    def recover_interrupted_jobs(self) -> int:
-        """Pause synthesis work that cannot still be active after process startup."""
+    def claim_job_work(
+        self, job_id: str, owner_id: str, *, lease_seconds: float = 1800.0
+    ) -> None:
+        """Atomically reserve both a job and its TTS connection for one worker."""
+        now = time.time()
+        expires = now + lease_seconds
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            job = connection.execute(
+                "SELECT COALESCE(j.provider_instance_id, v.provider_instance_id) "
+                "AS provider_instance_id FROM jobs j "
+                "LEFT JOIN narrator_profiles v ON v.id = j.narrator_profile_id "
+                "WHERE j.id = ?",
+                (job_id,),
+            ).fetchone()
+            if job is None:
+                raise KeyError(f"Generation job not found: {job_id}")
+            cursor = connection.execute(
+                """
+                UPDATE jobs SET lease_owner = ?, lease_expires_at = ?
+                WHERE id = ? AND (
+                    lease_owner IS NULL OR lease_expires_at < ? OR lease_owner = ?
+                )
+                """,
+                (owner_id, expires, job_id, now, owner_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("This generation job is already running elsewhere")
+            provider_id = str(job["provider_instance_id"])
+            cursor = connection.execute(
+                """
+                INSERT INTO provider_work_leases(
+                    provider_instance_id, owner_id, lease_expires_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(provider_instance_id) DO UPDATE SET
+                    owner_id = excluded.owner_id,
+                    lease_expires_at = excluded.lease_expires_at
+                WHERE provider_work_leases.lease_expires_at < ?
+                   OR provider_work_leases.owner_id = excluded.owner_id
+                """,
+                (provider_id, owner_id, expires, now),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("This TTS connection is already generating audio")
+
+    def renew_job_work(
+        self, job_id: str, owner_id: str, *, lease_seconds: float = 1800.0
+    ) -> None:
+        expires = time.time() + lease_seconds
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET lease_expires_at = ? "
+                "WHERE id = ? AND lease_owner = ?",
+                (expires, job_id, owner_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Generation worker lost its job lease")
+            connection.execute(
+                "UPDATE provider_work_leases SET lease_expires_at = ? "
+                "WHERE owner_id = ?",
+                (expires, owner_id),
+            )
+
+    def release_job_work(self, job_id: str, owner_id: str) -> None:
         with self.database.connect() as connection:
             connection.execute(
-                "UPDATE chunks SET status = 'pending' WHERE status = 'generating'"
+                "DELETE FROM provider_work_leases WHERE owner_id = ?", (owner_id,)
+            )
+            connection.execute(
+                "UPDATE jobs SET lease_owner = NULL, lease_expires_at = NULL "
+                "WHERE id = ? AND lease_owner = ?",
+                (job_id, owner_id),
+            )
+
+    def claim_provider_work(
+        self, provider_id: str, owner_id: str, *, lease_seconds: float = 1800.0
+    ) -> None:
+        now = time.time()
+        expires = now + lease_seconds
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO provider_work_leases(
+                    provider_instance_id, owner_id, lease_expires_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(provider_instance_id) DO UPDATE SET
+                    owner_id = excluded.owner_id,
+                    lease_expires_at = excluded.lease_expires_at
+                WHERE provider_work_leases.lease_expires_at < ?
+                   OR provider_work_leases.owner_id = excluded.owner_id
+                """,
+                (provider_id, owner_id, expires, now),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("This TTS connection is already generating audio")
+
+    def claim_assembly_work(
+        self, job_id: str, owner_id: str, *, lease_seconds: float = 1800.0
+    ) -> None:
+        now = time.time()
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET lease_owner = ?, lease_expires_at = ? "
+                "WHERE id = ? AND (lease_owner IS NULL OR lease_expires_at < ?)",
+                (owner_id, now + lease_seconds, job_id, now),
+            )
+        if cursor.rowcount != 1:
+            if self.job_status(job_id):
+                raise ValueError("This generation job is already active elsewhere")
+
+    def renew_assembly_work(
+        self, job_id: str, owner_id: str, *, lease_seconds: float = 1800.0
+    ) -> None:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET lease_expires_at = ? "
+                "WHERE id = ? AND lease_owner = ?",
+                (time.time() + lease_seconds, job_id, owner_id),
+            )
+        if cursor.rowcount != 1:
+            raise RuntimeError("Audiobook worker lost its job lease")
+
+    def renew_provider_work(
+        self, owner_id: str, *, lease_seconds: float = 1800.0
+    ) -> None:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE provider_work_leases SET lease_expires_at = ? "
+                "WHERE owner_id = ?",
+                (time.time() + lease_seconds, owner_id),
+            )
+        if cursor.rowcount != 1:
+            raise RuntimeError("TTS worker lost its connection lease")
+
+    def release_provider_work(self, owner_id: str) -> None:
+        with self.database.connect() as connection:
+            connection.execute(
+                "DELETE FROM provider_work_leases WHERE owner_id = ?", (owner_id,)
+            )
+
+    def recover_interrupted_jobs(self) -> int:
+        """Pause synthesis work that cannot still be active after process startup."""
+        now = time.time()
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE chunks SET status = 'pending'
+                WHERE status = 'generating' AND job_id IN (
+                    SELECT id FROM jobs
+                    WHERE lease_owner IS NULL OR lease_expires_at < ?
+                )
+                """,
+                (now,),
             )
             cursor = connection.execute(
                 """
                 UPDATE jobs SET status = 'paused', pause_after_chapter_index = NULL,
+                    lease_owner = NULL, lease_expires_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE status IN ('generating', 'pause_requested')
-                """
+                  AND (lease_owner IS NULL OR lease_expires_at < ?)
+                """,
+                (now,),
+            )
+            connection.execute(
+                "UPDATE jobs SET status = 'cancelled', error_message = NULL, "
+                "lease_owner = NULL, lease_expires_at = NULL, "
+                "updated_at = CURRENT_TIMESTAMP "
+                "WHERE status = 'cancel_requested' "
+                "AND (lease_owner IS NULL OR lease_expires_at < ?)",
+                (now,),
+            )
+            connection.execute(
+                "DELETE FROM provider_work_leases WHERE lease_expires_at < ?", (now,)
             )
         return cursor.rowcount
 
     def recover_interrupted_assemblies(self) -> int:
         """Make packaging jobs retryable after the serving process stopped."""
+        now = time.time()
         with self.database.connect() as connection:
             cursor = connection.execute(
                 "UPDATE jobs SET status = 'failed', error_message = ?, "
-                "updated_at = CURRENT_TIMESTAMP WHERE status = 'assembling'",
-                ("Audiobook assembly was interrupted. Build it again.",),
+                "lease_owner = NULL, lease_expires_at = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE status = 'assembling' "
+                "AND (lease_owner IS NULL OR lease_expires_at < ?)",
+                ("Audiobook assembly was interrupted. Build it again.", now),
             )
         return cursor.rowcount
 
@@ -583,6 +762,37 @@ class GenerationRepository:
             )
         if cursor.rowcount == 0 and self.job_status(job_id) not in {"paused", "completed"}:
             raise ValueError("Only ready or generating jobs can be paused")
+
+    def request_cancel(self, job_id: str) -> None:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET status = CASE WHEN status = 'ready' "
+                "THEN 'cancelled' ELSE 'cancel_requested' END, "
+                "pause_after_chapter_index = NULL, error_message = NULL, "
+                "updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND status IN ('ready', 'generating', 'pause_requested')",
+                (job_id,),
+            )
+        if cursor.rowcount == 0 and self.job_status(job_id) != "cancelled":
+            raise ValueError("Only ready or generating jobs can be cancelled")
+
+    def cancellation_requested(self, job_id: str) -> bool:
+        return self.job_status(job_id) == "cancel_requested"
+
+    def complete_cancellation(self, job_id: str, chunk_id: str | None = None) -> None:
+        with self.database.connect() as connection:
+            if chunk_id is not None:
+                connection.execute(
+                    "UPDATE chunks SET status = 'pending', updated_at = CURRENT_TIMESTAMP "
+                    "WHERE job_id = ? AND id = ? AND status = 'generating'",
+                    (job_id, chunk_id),
+                )
+            connection.execute(
+                "UPDATE jobs SET status = 'cancelled', error_message = NULL, "
+                "pause_after_chapter_index = NULL, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
+                (job_id,),
+            )
 
     def request_pause_after_chapter(self, job_id: str) -> int:
         with self.database.connect() as connection:
@@ -703,17 +913,47 @@ class GenerationRepository:
             )
 
     def complete_chunk(
-        self, job_id: str, chunk_id: str, path: str, sha256: str, duration: float
+        self,
+        job_id: str,
+        chunk_id: str,
+        path: str,
+        sha256: str,
+        duration: float,
+        *,
+        provider_request_id: str | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> None:
         with self.database.connect() as connection:
             connection.execute(
                 """
                 UPDATE chunks SET status = 'completed', audio_artifact_path = ?,
-                    audio_sha256 = ?, duration_seconds = ?, updated_at = CURRENT_TIMESTAMP
+                    audio_sha256 = ?, duration_seconds = ?, provider_request_id = ?,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE job_id = ? AND id = ?
                 """,
-                (path, sha256, duration, job_id, chunk_id),
+                (path, sha256, duration, provider_request_id, job_id, chunk_id),
             )
+            attempt = connection.execute(
+                "SELECT attempts FROM chunks WHERE job_id = ? AND id = ?",
+                (job_id, chunk_id),
+            ).fetchone()
+            wall = float((usage or {}).get("wall_seconds") or 0) or None
+            realtime = wall / duration if wall and duration > 0 else None
+            if attempt and int(attempt[0]) > 0:
+                connection.execute(
+                    "INSERT OR REPLACE INTO chunk_attempts("
+                    "chunk_id, attempt_number, status, provider_request_id, wall_seconds, "
+                    "audio_duration_seconds, realtime_factor) "
+                    "VALUES (?, ?, 'completed', ?, ?, ?, ?)",
+                    (
+                        chunk_id,
+                        int(attempt[0]),
+                        provider_request_id,
+                        wall,
+                        duration,
+                        realtime,
+                    ),
+                )
 
     def fail_chunk(self, job_id: str, chunk_id: str, message: str) -> None:
         with self.database.connect() as connection:
@@ -722,7 +962,18 @@ class GenerationRepository:
                 (job_id, chunk_id),
             ).fetchone()
             errors = json.loads(row[0]) if row else []
-            errors.append({"message": message})
+            errors.append({"message": message, "timestamp": time.time()})
+            attempt = connection.execute(
+                "SELECT attempts FROM chunks WHERE job_id = ? AND id = ?",
+                (job_id, chunk_id),
+            ).fetchone()
+            if attempt and int(attempt[0]) > 0:
+                connection.execute(
+                    "INSERT OR REPLACE INTO chunk_attempts("
+                    "chunk_id, attempt_number, status, error_message) "
+                    "VALUES (?, ?, 'failed', ?)",
+                    (chunk_id, int(attempt[0]), message),
+                )
             connection.execute(
                 """
                 UPDATE chunks SET status = 'failed', error_history_json = ?,
@@ -738,6 +989,32 @@ class GenerationRepository:
                 (message, job_id),
             )
 
+    def record_chunk_attempt_failure(
+        self, job_id: str, chunk_id: str, message: str
+    ) -> None:
+        """Record a retryable failure without stopping the owning job."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT attempts, error_history_json FROM chunks "
+                "WHERE job_id = ? AND id = ?",
+                (job_id, chunk_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Chunk not found: {chunk_id}")
+            errors = json.loads(row["error_history_json"])
+            errors.append({"message": message, "timestamp": time.time()})
+            connection.execute(
+                "UPDATE chunks SET error_history_json = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE job_id = ? AND id = ?",
+                (json.dumps(errors), job_id, chunk_id),
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO chunk_attempts("
+                "chunk_id, attempt_number, status, error_message) "
+                "VALUES (?, ?, 'failed', ?)",
+                (chunk_id, int(row["attempts"]), message),
+            )
+
     def fail_chunk_regeneration(self, job_id: str, chunk_id: str, message: str) -> None:
         """Record a failed retry while keeping the previously verified audio usable."""
         with self.database.connect() as connection:
@@ -748,7 +1025,7 @@ class GenerationRepository:
             if row is None:
                 raise KeyError(f"Chunk not found: {chunk_id}")
             errors = json.loads(row[0])
-            errors.append({"message": message})
+            errors.append({"message": message, "timestamp": time.time()})
             connection.execute(
                 """
                 UPDATE chunks SET status = 'completed', error_history_json = ?,
@@ -1052,7 +1329,9 @@ class GenerationRepository:
                 """
                 SELECT 1 FROM jobs
                 WHERE book_id = ?
-                  AND status IN ('generating', 'pause_requested', 'assembling')
+                  AND status IN (
+                      'generating', 'pause_requested', 'cancel_requested', 'assembling'
+                  )
                 LIMIT 1
                 """,
                 (book_id,),

@@ -41,7 +41,13 @@ PACKAGE = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
-def make_epub(path: Path, *, first_document: str | None = None) -> None:
+def make_epub(
+    path: Path,
+    *,
+    first_document: str | None = None,
+    package: str = PACKAGE,
+    navigation: str = "<html><body><nav>Contents</nav></body></html>",
+) -> None:
     one = """<html xmlns="http://www.w3.org/1999/xhtml"><body>
       <h1 id="title-one">One</h1><p>Hello <em>careful</em> world.</p>
     </body></html>"""
@@ -51,14 +57,43 @@ def make_epub(path: Path, *, first_document: str | None = None) -> None:
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
         archive.writestr("META-INF/container.xml", CONTAINER)
-        archive.writestr("EPUB/package.opf", PACKAGE)
-        archive.writestr("EPUB/nav.xhtml", "<html><body><nav>Contents</nav></body></html>")
+        archive.writestr("EPUB/package.opf", package)
+        archive.writestr("EPUB/nav.xhtml", navigation)
         archive.writestr("EPUB/one.xhtml", one)
         archive.writestr("EPUB/two.xhtml", two)
         archive.writestr("EPUB/cover.jpg", b"fake-jpeg")
 
 
 class EpubParserTests(unittest.TestCase):
+    def test_reads_navigation_series_subtitle_and_epub2_cover_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "metadata.epub"
+            package = PACKAGE.replace(
+                "<dc:identifier>urn:isbn:123</dc:identifier>",
+                """<dc:identifier>urn:isbn:123</dc:identifier>
+    <dc:title id="book-subtitle">A Small Tale</dc:title>
+    <meta property="title-type" refines="#book-subtitle">subtitle</meta>
+    <meta name="calibre:series" content="Example Stories"/>
+    <meta name="calibre:series_index" content="2"/>
+    <meta name="cover" content="cover"/>""",
+            ).replace(' properties="cover-image"', "")
+            navigation = """<html><body><nav><ol>
+              <li><a href="two.xhtml">The opening</a></li>
+              <li><a href="one.xhtml">The conclusion</a></li>
+            </ol></nav></body></html>"""
+            make_epub(path, package=package, navigation=navigation)
+
+            parsed = EpubParser().parse(path)
+
+            self.assertEqual(parsed.metadata.subtitle, "A Small Tale")
+            self.assertEqual(parsed.metadata.series, "Example Stories")
+            self.assertEqual(parsed.metadata.series_index, "2")
+            self.assertEqual(
+                [document.title for document in parsed.documents],
+                ["The opening", "The conclusion"],
+            )
+            self.assertEqual(parsed.cover_path, "EPUB/cover.jpg")
+
     def test_preserves_metadata_spine_source_mapping_and_all_readable_text(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "book.epub"

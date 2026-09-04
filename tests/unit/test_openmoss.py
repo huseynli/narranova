@@ -42,6 +42,13 @@ class FakeResponse:
 
 
 class OpenMossProviderTests(unittest.TestCase):
+    def test_connections_receive_a_finite_default_timeout(self) -> None:
+        config = OpenMossConfig.from_connection(
+            "http://moss.local:8000/tts", {}
+        )
+
+        self.assertEqual(config.timeout_seconds, 600.0)
+
     def test_instruction_only_request_omits_reference_audio(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "audition.wav"
@@ -177,6 +184,16 @@ class OpenMossProviderTests(unittest.TestCase):
 
             self.assertFalse(destination.exists())
             self.assertFalse((root / ".chunk.wav.part").exists())
+
+    def test_validation_rejects_a_wave_with_truncated_frame_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "truncated.wav"
+            reference_wave(path)
+            payload = path.read_bytes()
+            path.write_bytes(payload[:-20])
+
+            with self.assertRaisesRegex(ValueError, "truncated"):
+                validate_wave(path)
 
     def test_rejects_attempt_to_override_safe_transport_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

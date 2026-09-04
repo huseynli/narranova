@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
+
+
+class SynthesisCancelled(RuntimeError):
+    """Raised when the caller requests cancellation during synthesis."""
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,7 @@ class SynthesisRequest:
     reference_audio: Path | None = None
     seed: int | None = None
     parameters: Mapping[str, Any] = field(default_factory=dict)
+    cancel_requested: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
         if not self.text.strip():

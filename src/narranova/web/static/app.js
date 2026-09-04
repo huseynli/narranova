@@ -1,6 +1,7 @@
 const themeToggle = document.querySelector("[data-theme-toggle]");
 const themeLabel = document.querySelector("[data-theme-label]");
 const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
+const voiceAuditionMonitor = document.querySelector("[data-voice-audition-monitor]");
 
 function storedTheme() {
   try {
@@ -47,6 +48,26 @@ if (themeToggle) {
   colorScheme.addEventListener("change", (event) => {
     if (!storedTheme()) applyTheme(event.matches ? "dark" : "light");
   });
+}
+
+if (voiceAuditionMonitor && ["queued", "generating"].includes(voiceAuditionMonitor.dataset.status)) {
+  const pollAudition = async () => {
+    try {
+      const response = await fetch(voiceAuditionMonitor.dataset.statusUrl, {
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) throw new Error("Audition status request failed");
+      const state = await response.json();
+      if (["queued", "generating"].includes(state.status)) {
+        window.setTimeout(pollAudition, 1500);
+      } else {
+        window.location.replace(window.location.href);
+      }
+    } catch (error) {
+      window.setTimeout(pollAudition, 3000);
+    }
+  };
+  window.setTimeout(pollAudition, 750);
 }
 
 const jobMonitor = document.querySelector("[data-job-monitor]");
@@ -262,7 +283,7 @@ function updateJobPage(state) {
     error.hidden = !state.error;
   }
 
-  const jobActive = ["generating", "pause_requested", "assembling"].includes(status);
+  const jobActive = ["generating", "pause_requested", "cancel_requested", "assembling"].includes(status);
   const startable = (["ready", "failed", "paused"].includes(status)
     && state.completed < state.total)
     || (state.compacted && status === "completed");
@@ -270,8 +291,10 @@ function updateJobPage(state) {
   setJobControl("running", ["generating", "assembling"].includes(status));
   setJobControl("pause", status === "generating" && !state.regenerating && !state.chapter_pause_requested);
   setJobControl("pause-chapter", status === "generating" && !state.regenerating && !state.chapter_pause_requested);
+  setJobControl("cancel", ["generating", "pause_requested", "cancel_requested"].includes(status) && !state.regenerating);
   setJobControl("chapter-pause-requested", Boolean(state.chapter_pause_requested));
   setJobControl("pause-requested", status === "pause_requested");
+  setJobControl("cancel-requested", status === "cancel_requested");
   setJobControl("complete", status === "completed");
   setJobControl("assemble", Boolean(state.can_assemble));
   const runningLabel = document.querySelector("[data-job-running-label]");

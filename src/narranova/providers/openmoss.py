@@ -17,6 +17,7 @@ from typing import Any, Mapping, Sequence, TypedDict, cast
 from narranova.audio import validate_wave
 from narranova.providers.base import (
     ProviderCapabilities,
+    SynthesisCancelled,
     SynthesisRequest,
     SynthesisResult,
 )
@@ -189,7 +190,10 @@ class OpenMossConfig:
     default_sample_rate: int = 48_000
     default_channels: int = 2
     sample_width: int = 2
-    timeout_seconds: float | None = None
+    # urllib applies this to connection and individual socket reads.  Keeping a
+    # generous finite default prevents a dead endpoint from pinning a worker
+    # forever while still allowing slower homelab hardware to synthesize.
+    timeout_seconds: float | None = 600.0
 
     @classmethod
     def from_connection(
@@ -197,7 +201,7 @@ class OpenMossConfig:
         endpoint_url: str,
         configuration: Mapping[str, object] | None,
         *,
-        timeout_seconds: float | None = None,
+        timeout_seconds: float | None = 600.0,
     ) -> "OpenMossConfig":
         return cls(
             endpoint_url,
@@ -257,6 +261,8 @@ class OpenMossProvider:
         )
 
     def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
+        if request.cancel_requested and request.cancel_requested():
+            raise SynthesisCancelled("Synthesis was cancelled")
         if request.reference_audio is not None and not request.reference_audio.is_file():
             raise FileNotFoundError(f"Reference audio not found: {request.reference_audio}")
         if not request.instruction or not request.instruction.strip():
@@ -320,6 +326,8 @@ class OpenMossProvider:
                         reader = getattr(response, "read1", response.read)
                         first_audio_seconds: float | None = None
                         while block := reader(64 * 1024):
+                            if request.cancel_requested and request.cancel_requested():
+                                raise SynthesisCancelled("Synthesis was cancelled")
                             if first_audio_seconds is None:
                                 first_audio_seconds = time.monotonic() - started
                             output.writeframesraw(block)
@@ -342,7 +350,11 @@ class OpenMossProvider:
             os.replace(temporary, destination)
         finally:
             temporary.unlink(missing_ok=True)
-        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        digest_builder = hashlib.sha256()
+        with destination.open("rb") as audio:
+            for block in iter(lambda: audio.read(1024 * 1024), b""):
+                digest_builder.update(block)
+        digest = digest_builder.hexdigest()
         return SynthesisResult(
             audio_path=destination,
             audio_sha256=digest,

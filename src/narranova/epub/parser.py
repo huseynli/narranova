@@ -6,6 +6,7 @@ import html
 import posixpath
 import re
 import zipfile
+from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from xml.etree import ElementTree as ET
 
@@ -45,6 +46,55 @@ def _safe_xml(data: bytes, name: str) -> ET.Element:
         raise EpubError(f"Invalid XML document: {name}") from exc
 
 
+class _TolerantHTMLTree(HTMLParser):
+    _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.root = ET.Element("html")
+        self.stack = [self.root]
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        node = ET.SubElement(
+            self.stack[-1], tag, {key: value or "" for key, value in attrs}
+        )
+        if tag not in self._VOID:
+            self.stack.append(node)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        ET.SubElement(self.stack[-1], tag, {key: value or "" for key, value in attrs})
+
+    def handle_endtag(self, tag: str) -> None:
+        for index in range(len(self.stack) - 1, 0, -1):
+            if _local_name(self.stack[index].tag) == tag:
+                del self.stack[index:]
+                return
+
+    def handle_data(self, data: str) -> None:
+        current = self.stack[-1]
+        if len(current):
+            child = current[-1]
+            child.tail = (child.tail or "") + data
+        else:
+            current.text = (current.text or "") + data
+
+
+def _safe_content(data: bytes, name: str, media_type: str) -> ET.Element:
+    validate_xml(data, name)
+    try:
+        return ET.fromstring(data)
+    except ET.ParseError as exc:
+        if media_type.lower() != "text/html":
+            raise EpubError(f"Invalid XML document: {name}") from exc
+        try:
+            parser = _TolerantHTMLTree()
+            parser.feed(data.decode("utf-8", errors="replace"))
+            parser.close()
+            return parser.root
+        except Exception as html_exc:
+            raise EpubError(f"Invalid HTML document: {name}") from html_exc
+
+
 def _first(root: ET.Element, name: str) -> ET.Element | None:
     return next((node for node in root.iter() if _local_name(node.tag) == name), None)
 
@@ -55,6 +105,77 @@ def _metadata_values(root: ET.Element, name: str) -> tuple[str, ...]:
         for node in root.iter()
         if _local_name(node.tag) == name and (value := _normalize_text("".join(node.itertext())))
     )
+
+
+def _meta_value(root: ET.Element, *keys: str) -> str | None:
+    wanted = {key.lower() for key in keys}
+    for node in root.iter():
+        if _local_name(node.tag) != "meta":
+            continue
+        key = (node.attrib.get("property") or node.attrib.get("name") or "").lower()
+        if key in wanted:
+            value = node.attrib.get("content") or _normalize_text("".join(node.itertext()))
+            if value:
+                return value
+    return None
+
+
+def _subtitle(root: ET.Element) -> str | None:
+    title_by_id = {
+        node.attrib["id"]: _normalize_text("".join(node.itertext()))
+        for node in root.iter()
+        if _local_name(node.tag) == "title" and node.attrib.get("id")
+    }
+    for node in root.iter():
+        if (
+            _local_name(node.tag) == "meta"
+            and node.attrib.get("property", "").lower() == "title-type"
+            and _normalize_text("".join(node.itertext())).lower() == "subtitle"
+        ):
+            reference = node.attrib.get("refines", "").removeprefix("#")
+            if title_by_id.get(reference):
+                return title_by_id[reference]
+    return _meta_value(root, "subtitle")
+
+
+def _navigation_titles(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    manifest: dict[str, dict[str, str]],
+    package_dir: PurePosixPath,
+) -> dict[str, str]:
+    titles: dict[str, str] = {}
+    navigation_items = [
+        item
+        for item in manifest.values()
+        if "nav" in item.get("properties", "").split()
+        or item.get("media-type", "").lower() == "application/x-dtbncx+xml"
+    ]
+    for item in navigation_items:
+        navigation_path = _resolve(package_dir, item.get("href", ""))
+        if navigation_path not in names:
+            continue
+        root = _safe_xml(archive.read(navigation_path), navigation_path)
+        navigation_dir = PurePosixPath(navigation_path).parent
+        for node in root.iter():
+            href = node.attrib.get("href") if _local_name(node.tag) == "a" else None
+            if href:
+                title = _normalize_text("".join(node.itertext()))
+                if title:
+                    titles.setdefault(_resolve(navigation_dir, href), title)
+            if _local_name(node.tag) == "content" and node.attrib.get("src"):
+                parent_text = ""
+                # NCX labels occur near their content element; the nearest
+                # navPoint text is a safe and deterministic approximation.
+                for candidate in root.iter():
+                    if node in list(candidate):
+                        parent_text = _normalize_text("".join(candidate.itertext()))
+                        break
+                if parent_text:
+                    titles.setdefault(
+                        _resolve(navigation_dir, node.attrib["src"]), parent_text
+                    )
+    return titles
 
 
 def _inline_text(element: ET.Element) -> str:
@@ -183,13 +304,23 @@ class EpubParser:
         identifiers = _metadata_values(metadata_node, "identifier")
         publishers = _metadata_values(metadata_node, "publisher")
         descriptions = _metadata_values(metadata_node, "description")
+        series = _meta_value(
+            metadata_node, "calibre:series", "belongs-to-collection"
+        )
+        series_index = _meta_value(
+            metadata_node, "calibre:series_index", "group-position"
+        )
+        subtitle = _subtitle(metadata_node)
         metadata = BookMetadata(
             title=titles[0] if titles else "Untitled",
+            subtitle=subtitle,
             authors=authors,
             language=languages[0] if languages else None,
             identifiers=identifiers,
             publisher=publishers[0] if publishers else None,
             description=descriptions[0] if descriptions else None,
+            series=series,
+            series_index=series_index,
         )
 
         manifest: dict[str, dict[str, str]] = {}
@@ -197,6 +328,9 @@ class EpubParser:
             if _local_name(item.tag) == "item" and item.attrib.get("id"):
                 manifest[item.attrib["id"]] = dict(item.attrib)
         package_dir = PurePosixPath(opf_path).parent
+        navigation_titles = _navigation_titles(
+            archive, names, manifest, package_dir
+        )
         documents: list[SourceDocument] = []
         for spine_index, itemref in enumerate(spine_node, 1):
             if _local_name(itemref.tag) != "itemref":
@@ -211,7 +345,9 @@ class EpubParser:
             document_path = _resolve(package_dir, item.get("href", ""))
             if document_path not in names:
                 raise EpubError(f"Spine document is missing: {document_path}")
-            root = _safe_xml(archive.read(document_path), document_path)
+            root = _safe_content(
+                archive.read(document_path), document_path, item.get("media-type", "")
+            )
             elements = _readable_elements(root, spine_index, document_path)
             if not elements:
                 continue
@@ -224,7 +360,12 @@ class EpubParser:
                 SourceDocument(
                     spine_index=spine_index,
                     path=document_path,
-                    title=heading or fallback or f"Chapter {spine_index}",
+                    title=(
+                        navigation_titles.get(document_path)
+                        or heading
+                        or fallback
+                        or f"Chapter {spine_index}"
+                    ),
                     elements=elements,
                 )
             )
@@ -238,6 +379,10 @@ class EpubParser:
             (item for item in manifest.values() if "cover-image" in item.get("properties", "").split()),
             None,
         )
+        if cover_item is None:
+            cover_id = _meta_value(metadata_node, "cover")
+            if cover_id:
+                cover_item = manifest.get(cover_id)
         if cover_item:
             candidate = _resolve(package_dir, cover_item.get("href", ""))
             if candidate in names:

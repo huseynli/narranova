@@ -58,26 +58,31 @@ class FFmpegM4BEncoder:
         sources = [path for chapter in chapters for path in chapter.paths]
         if not sources:
             raise ValueError("An M4B requires at least one audio master")
-        command = [self.ffmpeg, "-nostdin", "-y"]
-        for source in sources:
-            command.extend(("-i", str(source)))
-        metadata_input = len(sources)
+        concat_manifest = workspace / "audio.ffconcat"
+        concat_manifest.write_text(
+            "ffconcat version 1.0\n"
+            + "".join(f"file '{self._concat_escape(source.resolve())}'\n" for source in sources),
+            encoding="utf-8",
+        )
+        # A concat manifest keeps the command and open-file count bounded for
+        # books containing hundreds or thousands of chunks.
+        command = [
+            self.ffmpeg,
+            "-nostdin",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_manifest),
+        ]
+        metadata_input = 1
         command.extend(("-f", "ffmetadata", "-i", str(ffmetadata)))
         cover_input = metadata_input + 1
         if cover is not None:
             command.extend(("-i", str(cover)))
-        if len(sources) == 1:
-            command.extend(("-map", "0:a:0"))
-        else:
-            inputs = "".join(f"[{index}:a:0]" for index in range(len(sources)))
-            command.extend(
-                (
-                    "-filter_complex",
-                    f"{inputs}concat=n={len(sources)}:v=0:a=1[audiobook]",
-                    "-map",
-                    "[audiobook]",
-                )
-            )
+        command.extend(("-map", "0:a:0"))
         if cover is not None:
             command.extend(
                 (
@@ -121,6 +126,10 @@ class FFmpegM4BEncoder:
         finally:
             temporary.unlink(missing_ok=True)
         return EncodedM4B(destination, duration)
+
+    @staticmethod
+    def _concat_escape(path: Path) -> str:
+        return path.as_posix().replace("'", "'\\''")
 
     def probe_duration(self, path: Path) -> float:
         self._require_tools()

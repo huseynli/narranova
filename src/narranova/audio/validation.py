@@ -34,10 +34,19 @@ def validate_wave(
                 frames=source.getnframes(),
                 duration_seconds=(source.getnframes() / source.getframerate()),
             )
+            expected_bytes = info.frames * info.channels * info.sample_width
+            actual_bytes = 0
+            while block := source.readframes(64 * 1024):
+                actual_bytes += len(block)
     except (EOFError, wave.Error) as exc:
         raise ValueError(f"Invalid WAV file: {path}") from exc
     if min(info.channels, info.sample_width, info.sample_rate, info.frames) <= 0:
         raise ValueError(f"WAV contains no usable audio frames: {path}")
+    if actual_bytes != expected_bytes:
+        raise ValueError(
+            f"WAV audio data is truncated: expected {expected_bytes} bytes, "
+            f"read {actual_bytes}"
+        )
     expected = {
         "channels": expected_channels,
         "sample_width": expected_sample_width,

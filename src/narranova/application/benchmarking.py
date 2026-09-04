@@ -121,8 +121,13 @@ class ConnectionBenchmarks:
         run = self.repository.get_run(benchmark_id)
         provider = self.generation.get_provider(run.provider_id)
         pair = default_voice_pair(BENCHMARK_VOICE_PAIR_ID)
+        owner_id = f"benchmark-{benchmark_id}"
+        claimed = False
         try:
+            self.generation.claim_provider_work(run.provider_id, owner_id)
+            claimed = True
             for frames in run.requested_frames:
+                self.generation.renew_provider_work(owner_id)
                 self.repository.set_active_frame(benchmark_id, frames)
                 temporary = self.layout.connection_benchmark_temporary(
                     benchmark_id, frames
@@ -192,6 +197,9 @@ class ConnectionBenchmarks:
                 self.repository.fail_run(benchmark_id, str(exc))
             self._prune(run.provider_id)
             raise
+        finally:
+            if claimed:
+                self.generation.release_provider_work(owner_id)
 
     def apply(self, benchmark_id: str, frames: int | None = None) -> int:
         run = self.repository.get_run(benchmark_id)

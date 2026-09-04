@@ -72,6 +72,7 @@ class VoiceStudio:
         self.store = store
         self.provider_factory = provider_factory or self._openmoss_provider
         self.layout.voice_studio_root.mkdir(parents=True, exist_ok=True)
+        self.cleanup_stale()
 
     def start(self) -> str:
         self.cleanup_stale()
@@ -91,6 +92,8 @@ class VoiceStudio:
             "uploaded_reference_path": None,
             "uploaded_reference_sha256": None,
             "takes": [],
+            "audition_status": "idle",
+            "audition_error": None,
         }
         self._write(draft)
         return draft_id
@@ -154,6 +157,8 @@ class VoiceStudio:
                 "language": language.strip() or "English",
                 "sampling": dict(sampling_overrides),
                 "updated_at": time.time(),
+                "audition_status": "generating",
+                "audition_error": None,
             }
         )
         self._write(draft)
@@ -164,7 +169,11 @@ class VoiceStudio:
         )
         take_id = uuid.uuid4().hex
         destination = self.layout.voice_studio_take(draft_id, take_id)
+        owner_id = f"voice-{draft_id}-{take_id}"
+        claimed = False
         try:
+            self.generation.claim_provider_work(provider_id, owner_id)
+            claimed = True
             request_sampling = dict(sampling_overrides)
             seed = request_sampling.pop("seed", None)
             result = self.provider_factory(provider).synthesize(
@@ -184,9 +193,17 @@ class VoiceStudio:
             validate_wave(result_path)
             if self.store.sha256(result_path) != result.audio_sha256:
                 raise RuntimeError("Generated audition failed hash validation")
-        except Exception:
+        except Exception as exc:
             destination.unlink(missing_ok=True)
+            failed = self.get(draft_id)
+            failed["audition_status"] = "failed"
+            failed["audition_error"] = str(exc)
+            failed["updated_at"] = time.time()
+            self._write(failed)
             raise
+        finally:
+            if claimed:
+                self.generation.release_provider_work(owner_id)
         take = {
             "id": take_id,
             "provider_id": provider_id,
@@ -201,9 +218,30 @@ class VoiceStudio:
             "created_at": time.time(),
         }
         draft["takes"].append(take)
+        draft["audition_status"] = "idle"
+        draft["audition_error"] = None
         draft["updated_at"] = time.time()
         self._write(draft)
         return take_id
+
+    def stage_uploaded_reference(self, draft_id: str, source: Path) -> None:
+        validate_wave(source)
+        destination = self.layout.voice_studio_upload(draft_id)
+        digest = self.store.copy(source, destination)
+        draft = self.get(draft_id)
+        draft["uploaded_reference_path"] = destination.relative_to(
+            self.layout.root
+        ).as_posix()
+        draft["uploaded_reference_sha256"] = digest
+        draft["updated_at"] = time.time()
+        self._write(draft)
+
+    def mark_audition_queued(self, draft_id: str) -> None:
+        draft = self.get(draft_id)
+        draft["audition_status"] = "queued"
+        draft["audition_error"] = None
+        draft["updated_at"] = time.time()
+        self._write(draft)
 
     def save_profile(
         self,
@@ -216,6 +254,8 @@ class VoiceStudio:
         language: str,
     ) -> str:
         draft = self.get(draft_id)
+        if draft.get("audition_status") in {"queued", "generating"}:
+            raise ValueError("Wait for the active audition before saving this profile")
         pair_take = self._pair_take(draft, reference_choice)
         provider_id = str(pair_take["provider_id"])
         instruction = str(pair_take["instruction"])
@@ -263,6 +303,9 @@ class VoiceStudio:
         draft_root = self.layout.voice_studio_draft(draft_id)
         if not draft_root.exists():
             raise KeyError(f"Voice Studio draft not found: {draft_id}")
+        draft = self.get(draft_id)
+        if draft.get("audition_status") in {"queued", "generating"}:
+            raise ValueError("Wait for the active audition before discarding this draft")
         shutil.rmtree(draft_root)
 
     def cleanup_stale(self, max_age_seconds: int = 24 * 60 * 60) -> None:

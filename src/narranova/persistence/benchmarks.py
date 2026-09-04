@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from sqlite3 import Row
@@ -221,8 +222,15 @@ class BenchmarkRepository:
                 SET status = 'failed', active_stream_chunk_frames = NULL,
                     error_message = 'Benchmark interrupted when Narranova stopped',
                     completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                WHERE status = 'running'
-                """
+                WHERE status = 'running' AND NOT EXISTS (
+                    SELECT 1 FROM provider_work_leases lease
+                    WHERE lease.provider_instance_id =
+                          connection_benchmark_runs.provider_instance_id
+                      AND lease.owner_id = 'benchmark-' || connection_benchmark_runs.id
+                      AND lease.lease_expires_at >= ?
+                )
+                """,
+                (time.time(),),
             )
         return cursor.rowcount
 

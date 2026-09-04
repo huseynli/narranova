@@ -7,7 +7,6 @@ import html
 import json
 import secrets
 import shutil
-import threading
 from dataclasses import dataclass
 from http import HTTPStatus
 from importlib.resources import files
@@ -49,6 +48,11 @@ from narranova.providers import (
     OpenMossProvider,
     openmoss_sampling_from_form,
 )
+from narranova.web.supervisors import (
+    BenchmarkSupervisor,
+    JobSupervisor,
+    VoiceStudioSupervisor,
+)
 
 
 MAX_REQUEST_BYTES = 128 * 1024 * 1024
@@ -59,130 +63,6 @@ StartResponse = Callable[[str, list[tuple[str, str]]], None]
 class Upload:
     filename: str
     path: Path
-
-
-class JobSupervisor:
-    def __init__(self, jobs: GenerationJobs, assembler: AudioAssembler) -> None:
-        self.jobs = jobs
-        self.assembler = assembler
-        self._lock = threading.Lock()
-        self._active: dict[str, str] = {}
-
-    def start(self, job_id: str) -> bool:
-        with self._lock:
-            if job_id in self._active:
-                return False
-            self._active[job_id] = "job"
-        try:
-            self.jobs.prepare(job_id)
-        except Exception:
-            with self._lock:
-                self._active.pop(job_id, None)
-            raise
-        thread = threading.Thread(target=self._run, args=(job_id,), daemon=True)
-        thread.start()
-        return True
-
-    def regenerate(self, job_id: str, chunk_id: str) -> bool:
-        with self._lock:
-            if job_id in self._active:
-                return False
-            self._active[job_id] = "chunk"
-        try:
-            self.jobs.prepare_chunk_regeneration(job_id, chunk_id)
-        except Exception:
-            with self._lock:
-                self._active.pop(job_id, None)
-            raise
-        thread = threading.Thread(
-            target=self._regenerate, args=(job_id, chunk_id), daemon=True
-        )
-        thread.start()
-        return True
-
-    def is_active(self, job_id: str) -> bool:
-        with self._lock:
-            return job_id in self._active
-
-    def is_regenerating(self, job_id: str) -> bool:
-        with self._lock:
-            return self._active.get(job_id) == "chunk"
-
-    def is_assembling(self, job_id: str) -> bool:
-        with self._lock:
-            return self._active.get(job_id) == "assembly"
-
-    def assemble(self, job_id: str) -> bool:
-        with self._lock:
-            if job_id in self._active:
-                return False
-            self._active[job_id] = "assembly"
-        try:
-            self.assembler.prepare(job_id)
-        except Exception:
-            with self._lock:
-                self._active.pop(job_id, None)
-            raise
-        thread = threading.Thread(target=self._assemble, args=(job_id,), daemon=True)
-        thread.start()
-        return True
-
-    def _run(self, job_id: str) -> None:
-        try:
-            self.jobs.run(job_id, prepared=True)
-        except Exception:
-            # The job engine records provider failures durably for the UI.
-            pass
-        finally:
-            with self._lock:
-                self._active.pop(job_id, None)
-
-    def _regenerate(self, job_id: str, chunk_id: str) -> None:
-        try:
-            self.jobs.regenerate_chunk(job_id, chunk_id, prepared=True)
-        except Exception:
-            # The job engine records regeneration failures durably for the UI.
-            pass
-        finally:
-            with self._lock:
-                self._active.pop(job_id, None)
-
-    def _assemble(self, job_id: str) -> None:
-        try:
-            self.assembler.run(job_id, prepared=True)
-        except Exception:
-            # The assembler records durable failures for the UI.
-            pass
-        finally:
-            with self._lock:
-                self._active.pop(job_id, None)
-
-
-class BenchmarkSupervisor:
-    def __init__(self, benchmarks: ConnectionBenchmarks) -> None:
-        self.benchmarks = benchmarks
-        self._lock = threading.Lock()
-        self._active: set[str] = set()
-
-    def start(self, benchmark_id: str) -> None:
-        with self._lock:
-            if benchmark_id in self._active:
-                raise ValueError("Benchmark is already running")
-            self._active.add(benchmark_id)
-        thread = threading.Thread(
-            target=self._run, args=(benchmark_id,), daemon=True
-        )
-        thread.start()
-
-    def _run(self, benchmark_id: str) -> None:
-        try:
-            self.benchmarks.run(benchmark_id)
-        except Exception:
-            # The benchmark service records its failure durably for the UI.
-            pass
-        finally:
-            with self._lock:
-                self._active.discard(benchmark_id)
 
 
 class NarranovaWebApp:
@@ -218,12 +98,20 @@ class NarranovaWebApp:
         self.default_voices = default_voice_pairs()
         self.supervisor = JobSupervisor(jobs, assembler)
         self.benchmark_supervisor = BenchmarkSupervisor(benchmarks)
+        self.voice_supervisor = VoiceStudioSupervisor(voice_studio)
 
     def __call__(self, environ: dict[str, object], start_response: StartResponse) -> Iterable[bytes]:
         method = str(environ.get("REQUEST_METHOD", "GET")).upper()
         path = unquote(str(environ.get("PATH_INFO", "/")))
         csrf, set_cookie = self._csrf_token(environ)
         try:
+            if method == "GET" and path == "/healthz":
+                return self._respond(
+                    start_response,
+                    "200 OK",
+                    b'{"status":"ok"}',
+                    "application/json; charset=utf-8",
+                )
             if method == "GET" and path in {
                 "/static/app.css",
                 "/static/choices.css",
@@ -368,6 +256,25 @@ class NarranovaWebApp:
                     start_response,
                     self._voice_studio(parts[2], environ, csrf),
                     set_cookie,
+                )
+            if (
+                method == "GET"
+                and len(parts) == 4
+                and parts[:2] == ["voices", "drafts"]
+                and parts[3] == "status"
+            ):
+                draft = self.voice_studio.get(parts[2])
+                return self._respond(
+                    start_response,
+                    "200 OK",
+                    json.dumps(
+                        {
+                            "status": draft.get("audition_status", "idle"),
+                            "error": draft.get("audition_error") or "",
+                            "take_count": len(draft.get("takes", [])),
+                        }
+                    ).encode("utf-8"),
+                    "application/json; charset=utf-8",
                 )
             if (
                 method == "GET"
@@ -642,7 +549,9 @@ class NarranovaWebApp:
             return self._redirect(start_response, f"/voices/drafts/{draft_id}")
         if len(parts) == 4 and parts[:2] == ["voices", "drafts"] and parts[3] == "auditions":
             upload = uploads.get("reference")
-            self.voice_studio.generate_take(
+            if upload:
+                self.voice_studio.stage_uploaded_reference(parts[2], upload.path)
+            started = self.voice_supervisor.start(
                 parts[2],
                 provider_id=fields.get("provider_id", ""),
                 reference_choice=fields.get("reference_choice", ""),
@@ -650,7 +559,7 @@ class NarranovaWebApp:
                 sample_text=fields.get("sample_text", ""),
                 language=fields.get("language", "English"),
                 profile_name=fields.get("name", ""),
-                uploaded_reference=upload.path if upload else None,
+                uploaded_reference=None,
                 sampling=openmoss_sampling_from_form(fields),
             )
             workflow = (
@@ -660,7 +569,9 @@ class NarranovaWebApp:
             )
             return self._redirect(
                 start_response,
-                f"/voices/drafts/{parts[2]}?notice=New+audition+ready&open={workflow}",
+                f"/voices/drafts/{parts[2]}?notice="
+                f"{'Audition+generation+started' if started else 'Audition+already+running'}"
+                f"&open={workflow}",
             )
         if len(parts) == 4 and parts[:2] == ["voices", "drafts"] and parts[3] == "save":
             profile_id = self.voice_studio.save_profile(
@@ -676,6 +587,8 @@ class NarranovaWebApp:
                 f"/voices?notice=Voice+profile+saved+{profile_id}",
             )
         if len(parts) == 4 and parts[:2] == ["voices", "drafts"] and parts[3] == "discard":
+            if self.voice_supervisor.is_active(parts[2]):
+                raise ValueError("Wait for the active audition before discarding this draft")
             self.voice_studio.discard(parts[2])
             return self._redirect(start_response, "/voices?notice=Voice+draft+discarded")
         if len(parts) == 2 and parts[0] == "voices":
@@ -740,6 +653,11 @@ class NarranovaWebApp:
             return self._redirect(
                 start_response,
                 f"/jobs/{parts[1]}?notice=Pause+after+chapter+requested",
+            )
+        if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "cancel":
+            self.generation.request_cancel(parts[1])
+            return self._redirect(
+                start_response, f"/jobs/{parts[1]}?notice=Stop+requested"
             )
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "assemble":
             started = self.supervisor.assemble(parts[1])
@@ -846,7 +764,9 @@ class NarranovaWebApp:
     def _jobs(self, environ: dict[str, object], csrf: str) -> str:
         """Render the cross-book generation job workspace."""
         jobs = self.generation.list_jobs()
-        active_statuses = {"generating", "pause_requested", "assembling"}
+        active_statuses = {
+            "generating", "pause_requested", "cancel_requested", "assembling"
+        }
         recent_statuses = {"uploaded", "planned", "choosing_voice", "ready"}
         finished_statuses = {"completed"}
         stopped_statuses = {"paused", "failed", "cancelled"}
@@ -1089,7 +1009,16 @@ class NarranovaWebApp:
                 '<details class="panel lab-workflow" open>',
                 1,
             )
-        body = f"""<a class="back" href="/voices">← Voice profiles</a><section class="studio-heading full-page-heading"><div><p class="eyebrow">Voice Lab</p><h1>Build a stable narrator</h1><p>Choose one path: create a reference voice from direction, or test a recording of your own.</p></div><form method="post" action="/voices/drafts/{self._e(draft_id)}/discard">{self._csrf(csrf)}<button class="quiet-danger">Discard draft</button></form></section><div class="voice-lab-stack">{generated_workflow}{uploaded_workflow}</div>"""
+        audition_status = str(draft.get("audition_status") or "idle")
+        audition_error = str(draft.get("audition_error") or "")
+        audition_notice = (
+            '<div class="selection-note"><span>●</span><p>Generating your audition in the background. You can keep this page open.</p></div>'
+            if audition_status in {"queued", "generating"}
+            else f'<div class="alert">{self._e(audition_error)}</div>'
+            if audition_error
+            else ""
+        )
+        body = f"""<a class="back" href="/voices">← Voice profiles</a><section class="studio-heading full-page-heading"><div><p class="eyebrow">Voice Lab</p><h1>Build a stable narrator</h1><p>Choose one path: create a reference voice from direction, or test a recording of your own.</p></div><form method="post" action="/voices/drafts/{self._e(draft_id)}/discard">{self._csrf(csrf)}<button class="quiet-danger">Discard draft</button></form></section><div data-voice-audition-monitor data-status-url="/voices/drafts/{self._e(draft_id)}/status" data-status="{self._e(audition_status)}">{audition_notice}</div><div class="voice-lab-stack">{generated_workflow}{uploaded_workflow}</div>"""
         return self._layout("Voice Lab", body, environ)
 
     def _new_narration(self, book_id: str, environ: dict[str, object], csrf: str) -> str:
@@ -1203,7 +1132,9 @@ class NarranovaWebApp:
         editable_bytes = self._chunk_master_bytes(chunks)
         artifacts = self._visible_outputs(job_id)
         has_audiobook = any(artifact.kind == "audiobook" for artifact in artifacts)
-        regeneration_disabled = status in {"generating", "pause_requested", "assembling"}
+        regeneration_disabled = status in {
+            "generating", "pause_requested", "cancel_requested", "assembling"
+        }
         chunk_rows = "".join(
             f"""<article class="chunk-row" data-chunk-id="{self._e(chunk.database_id)}"><div><span class="mono">{self._e(chunk.id)}</span><strong data-chunk-status>{self._e(chunk.status)}</strong><small data-chunk-meta>{chunk.attempts} attempt{'s' if chunk.attempts != 1 else ''}{f' · {chunk.duration_seconds:.1f}s' if chunk.duration_seconds else ''}{' · lossless FLAC' if chunk.audio_artifact_path else ''}</small></div><div class="chunk-actions" data-chunk-actions>{self._chunk_actions(job_id, chunk.database_id, csrf, regeneration_disabled) if chunk.status == 'completed' and chunk.audio_artifact_path else '<span class="source-removed">Master removed after finalization</span>' if compacted else ''}</div></article>"""
             for chunk in chunks
@@ -1225,7 +1156,8 @@ class NarranovaWebApp:
             if regenerating
             else "Generation in progress"
         )
-        controls = f"""<form method="post" action="/jobs/{self._e(job_id)}/run" data-job-start{' hidden' if not startable else ''}>{self._csrf(csrf)}<button class="primary" data-job-start-label>{start_label}</button></form><span class="running-mark" data-job-running{' hidden' if status not in {'generating', 'assembling'} else ''}><i></i><b data-job-running-label>{running_label}</b></span><form method="post" action="/jobs/{self._e(job_id)}/pause" data-job-pause{' hidden' if status != 'generating' or regenerating or chapter_pause_requested else ''}>{self._csrf(csrf)}<button>Pause after chunk</button></form><form method="post" action="/jobs/{self._e(job_id)}/pause-chapter" data-job-pause-chapter{' hidden' if status != 'generating' or regenerating or chapter_pause_requested else ''}>{self._csrf(csrf)}<button>Pause after chapter</button></form><span class="pause-mark" data-job-chapter-pause-requested{' hidden' if not chapter_pause_requested else ''}>Pause requested · finishing current chapter</span><span class="pause-mark" data-job-pause-requested{' hidden' if status != 'pause_requested' else ''}>Pause requested · finishing current chunk</span><span class="complete-mark" data-job-complete{' hidden' if status != 'completed' else ''}>✓ Generation complete</span><a class="danger-link job-delete" href="/jobs/{self._e(job_id)}/delete">Delete job</a>"""
+        stop_control = f'''<form method="post" action="/jobs/{self._e(job_id)}/cancel" data-job-cancel{' hidden' if status not in {'generating', 'pause_requested', 'cancel_requested'} or regenerating else ''}>{self._csrf(csrf)}<button class="danger-button">Stop now</button></form><span class="pause-mark" data-job-cancel-requested{' hidden' if status != 'cancel_requested' else ''}>Stopping · discarding the active partial chunk</span>'''
+        controls = f"""<form method="post" action="/jobs/{self._e(job_id)}/run" data-job-start{' hidden' if not startable else ''}>{self._csrf(csrf)}<button class="primary" data-job-start-label>{start_label}</button></form><span class="running-mark" data-job-running{' hidden' if status not in {'generating', 'assembling'} else ''}><i></i><b data-job-running-label>{running_label}</b></span><form method="post" action="/jobs/{self._e(job_id)}/pause" data-job-pause{' hidden' if status != 'generating' or regenerating or chapter_pause_requested else ''}>{self._csrf(csrf)}<button>Pause after chunk</button></form><form method="post" action="/jobs/{self._e(job_id)}/pause-chapter" data-job-pause-chapter{' hidden' if status != 'generating' or regenerating or chapter_pause_requested else ''}>{self._csrf(csrf)}<button>Pause after chapter</button></form>{stop_control}<span class="pause-mark" data-job-chapter-pause-requested{' hidden' if not chapter_pause_requested else ''}>Pause requested · finishing current chapter</span><span class="pause-mark" data-job-pause-requested{' hidden' if status != 'pause_requested' else ''}>Pause requested · finishing current chunk</span><span class="complete-mark" data-job-complete{' hidden' if status != 'completed' else ''}>✓ Generation complete</span><a class="danger-link job-delete" href="/jobs/{self._e(job_id)}/delete">Delete job</a>"""
         error_message = str(job.get("error_message") or "")
         error = f'<div class="alert" data-job-error{"" if error_message else " hidden"}>{self._e(error_message)}</div>'
         output_rows = self._output_rows(job_id, artifacts)
@@ -1458,23 +1390,16 @@ class NarranovaWebApp:
             )
         if byte_range is not None:
             start, end = byte_range
-            with path.open("rb") as audio:
-                audio.seek(start)
-                content = audio.read(end - start + 1)
-            return self._respond(
+            return self._stream_file(
                 start_response,
                 "206 Partial Content",
-                content,
+                path,
                 "audio/flac",
                 headers=headers + [("Content-Range", f"bytes {start}-{end}/{size}")],
+                start=start,
+                length=end - start + 1,
             )
-        return self._respond(
-            start_response,
-            "200 OK",
-            path.read_bytes(),
-            "audio/flac",
-            headers=headers,
-        )
+        return self._stream_file(start_response, "200 OK", path, "audio/flac", headers=headers)
 
     def _confirm(
         self,
@@ -1527,23 +1452,16 @@ class NarranovaWebApp:
             )
         if byte_range is not None:
             start, end = byte_range
-            with path.open("rb") as audio:
-                audio.seek(start)
-                content = audio.read(end - start + 1)
-            return self._respond(
+            return self._stream_file(
                 start_response,
                 "206 Partial Content",
-                content,
+                path,
                 "audio/flac",
                 headers=headers + [("Content-Range", f"bytes {start}-{end}/{size}")],
+                start=start,
+                length=end - start + 1,
             )
-        return self._respond(
-            start_response,
-            "200 OK",
-            path.read_bytes(),
-            "audio/flac",
-            headers=headers,
-        )
+        return self._stream_file(start_response, "200 OK", path, "audio/flac", headers=headers)
 
     def _artifact_download(
         self,
@@ -1633,7 +1551,7 @@ class NarranovaWebApp:
         take_id: str,
     ) -> Iterable[bytes]:
         path, _ = self.voice_studio.take_audio(draft_id, take_id)
-        return self._respond(start_response, "200 OK", path.read_bytes(), "audio/wav")
+        return self._stream_file(start_response, "200 OK", path, "audio/wav")
 
     def _studio_uploaded_audio(
         self,
@@ -1641,7 +1559,7 @@ class NarranovaWebApp:
         draft_id: str,
     ) -> Iterable[bytes]:
         path, _ = self.voice_studio.uploaded_audio(draft_id)
-        return self._respond(start_response, "200 OK", path.read_bytes(), "audio/wav")
+        return self._stream_file(start_response, "200 OK", path, "audio/wav")
 
     def _profile_audio(
         self,
@@ -1654,7 +1572,7 @@ class NarranovaWebApp:
         validate_wave(path)
         if self.store.sha256(path) != profile["reference_sha256"]:
             raise RuntimeError("Voice reference failed hash validation")
-        return self._respond(start_response, "200 OK", path.read_bytes(), "audio/wav")
+        return self._stream_file(start_response, "200 OK", path, "audio/wav")
 
     def _default_voice_audio(
         self,
@@ -1665,9 +1583,7 @@ class NarranovaWebApp:
         validate_wave(pair.audio_path)
         if self.store.sha256(pair.audio_path) != pair.audio_sha256:
             raise RuntimeError("Built-in narrator audio failed hash validation")
-        return self._respond(
-            start_response, "200 OK", pair.audio_path.read_bytes(), "audio/wav"
-        )
+        return self._stream_file(start_response, "200 OK", pair.audio_path, "audio/wav")
 
     def _layout(self, title: str, body: str, environ: dict[str, object], refresh: bool = False) -> str:
         query = parse_qs(str(environ.get("QUERY_STRING", "")))
@@ -1797,6 +1713,42 @@ class NarranovaWebApp:
         start_response(status, response_headers)
         return [content]
 
+    @staticmethod
+    def _stream_file(
+        start_response: StartResponse,
+        status: str,
+        path: Path,
+        content_type: str,
+        *,
+        headers: list[tuple[str, str]] | None = None,
+        start: int = 0,
+        length: int | None = None,
+    ) -> Iterable[bytes]:
+        remaining = path.stat().st_size - start if length is None else length
+        response_headers = list(headers or [])
+        response_headers.extend(
+            [
+                ("Content-Type", content_type),
+                ("Content-Length", str(remaining)),
+                ("X-Content-Type-Options", "nosniff"),
+                ("Referrer-Policy", "same-origin"),
+            ]
+        )
+        start_response(status, response_headers)
+
+        def stream() -> Iterable[bytes]:
+            left = remaining
+            with path.open("rb") as source:
+                source.seek(start)
+                while left > 0:
+                    block = source.read(min(1024 * 1024, left))
+                    if not block:
+                        break
+                    left -= len(block)
+                    yield block
+
+        return stream()
+
 
 def create_web_app(
     data_dir: str | Path | None = None,
@@ -1816,6 +1768,7 @@ def create_web_app(
     benchmark_repository = BenchmarkRepository(database)
     benchmark_repository.recover_interrupted()
     store = ArtifactStore(settings.data_dir)
+    store.cleanup_abandoned_partials()
     audio_masters = masters or FFmpegAudioMasters()
     profiles = VoiceProfiles(generation, layout, store)
     jobs = GenerationJobs(books, generation, layout, store, masters=audio_masters)

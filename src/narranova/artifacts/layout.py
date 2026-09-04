@@ -89,6 +89,15 @@ class ArtifactLayout:
         safe_chunk_id = _validate_id(chunk_id, "chunk id")
         return self.job_root(book_id, job_id) / "chunks" / f"{safe_chunk_id}.flac"
 
+    def job_chunk_replacement(
+        self, book_id: str, job_id: str, chunk_id: str, token: str
+    ) -> Path:
+        safe_chunk_id = _validate_id(chunk_id, "chunk id")
+        safe_token = _validate_id(token, "replacement token")
+        return self.job_root(book_id, job_id) / "chunks" / (
+            f"{safe_chunk_id}-{safe_token}.flac"
+        )
+
     def job_chunk_temporary(self, job_id: str, chunk_id: str, token: str) -> Path:
         safe_job_id = _validate_id(job_id, "job id")
         safe_chunk_id = _validate_id(chunk_id, "chunk id")

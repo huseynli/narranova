@@ -25,7 +25,9 @@ class DeleteArtifacts:
 
     def generated_chunk(self, job_id: str, chunk_id: str) -> str:
         job = self.generation.get_job(job_id)
-        if job["status"] in {"generating", "pause_requested", "assembling"}:
+        if job["status"] in {
+            "generating", "pause_requested", "cancel_requested", "assembling"
+        }:
             raise ValueError(
                 "Pause generation or wait for audiobook assembly before deleting audio"
             )
@@ -51,7 +53,9 @@ class DeleteArtifacts:
 
     def job(self, job_id: str) -> str:
         job = self.generation.get_job(job_id)
-        if job["status"] in {"generating", "pause_requested", "assembling"}:
+        if job["status"] in {
+            "generating", "pause_requested", "cancel_requested", "assembling"
+        }:
             raise ValueError(
                 "Pause generation or wait for audiobook assembly before deleting it"
             )
@@ -68,7 +72,9 @@ class DeleteArtifacts:
     def compact_job(self, job_id: str) -> int:
         """Remove editable chunk masters after the final audiobook is verified."""
         job = self.generation.get_job(job_id)
-        if job["status"] in {"generating", "pause_requested", "assembling"}:
+        if job["status"] in {
+            "generating", "pause_requested", "cancel_requested", "assembling"
+        }:
             raise ValueError("Wait for active generation or assembly before finalizing")
         audiobook_artifacts = [
             artifact
