@@ -14,7 +14,7 @@ Website: [narranova.app](https://narranova.app)
 
 > [!IMPORTANT]
 > Narranova does not include a TTS model or runtime. Run
-> [pwilkin/OpenMOSS](https://github.com/pwilkin/openmoss) separately with a
+> [pwilkin/OpenMOSS](https://github.com/pwilkin/openmoss) separately, with their
 > [moss-tts-local-gguf](https://huggingface.co/ilintar/moss-tts-local-gguf)
 > model, then connect Narranova to its `/tts` endpoint.
 
