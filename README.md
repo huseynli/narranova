@@ -1,90 +1,252 @@
 # Narranova
 
-Narranova is a self-hostable EPUB-to-audiobook application. It creates a
-reviewable narration plan, generates audio through external TTS providers, and
-produces a chapterized M4B without retaining duplicate chapter PCM files.
+Narranova is a self-hosted service for turning DRM-free EPUB books into
+chapterized audiobooks with an external text-to-speech engine. Its Web UI takes
+you from book import and narration planning through voice selection, resumable
+generation, audio review, and final M4B export.
 
-The production implementation lives under `src/narranova`. MOSS/OpenMOSS is an
-external service; its runtime, models, and Windows dependencies are not part of
-this repository.
+Narranova is designed for long-running audiobook work on a home server. It
+keeps generation state in SQLite, verifies generated audio before accepting it,
+and lets you pause, resume, repair, or selectively regenerate work without
+starting the entire book again.
 
-## Development
+Website: [narranova.app](https://narranova.app)
 
-Narranova currently requires Python 3.10 or newer. Initialize a local data
-directory without installing the package:
+> [!IMPORTANT]
+> Narranova does not include a TTS model or runtime. OpenMOSS currently runs as
+> a separate service and Narranova connects to its `/tts` endpoint.
+
+## What Narranova does
+
+A typical audiobook moves through this workflow:
+
+1. Import a DRM-free EPUB into the library.
+2. Review the extracted sections and exclude front matter, tables of contents,
+   copyright pages, or anything else you do not want narrated.
+3. Connect an OpenMOSS server and benchmark it for the host hardware.
+4. Choose one of the included narrator pairs or build a reusable custom voice
+   profile in Voice Lab.
+5. Configure optional pauses, text normalization, and book-specific IPA
+   pronunciations.
+6. Create a narration job and review generated chunks as they arrive.
+7. Regenerate individual chunks when a take does not sound right.
+8. Build and download a chapterized M4B with book metadata and cover art.
+
+The imported book text and narration plan remain unchanged. Enhancements are
+applied to a separate, hashed TTS-input snapshot belonging to the job.
+
+## Features
+
+### Book library and narration planning
+
+- Defensive EPUB ZIP/XML parsing with archive traversal and expansion checks
+- Metadata, author, language, spine, navigation, and cover extraction
+- Reviewable, source-mapped narration sections
+- Automatic saving when sections are included or excluded
+- Immutable plan revisions, so existing jobs do not change when a plan changes
+- Safe deletion of a book together with its jobs and generated audiobooks
+
+### Narration Enhancement
+
+Narranova can deterministically prepare text for narration without using an LLM
+or rewriting the author's prose:
+
+- Configurable pauses after chapter and section headings
+- Scene-break pauses for `<hr>`, `***`, `* * *`, and similar separators
+- TTS normalization for common whitespace, quote, ellipsis, dash, and
+  non-breaking-space variants
+- A per-book `term = IPA` pronunciation dictionary
+- Native OpenMOSS `[pause X.Ys]` controls and slash-wrapped `/IPA/`
+- Per-book enable/disable controls with settings snapshotted into each new job
+
+Normal paragraphs do not receive additional pause tags.
+
+### Connections and performance
+
+- Multiple saved TTS connections with automatic health indicators
+- A dedicated OpenMOSS adapter for streamed PCM generation
+- Connection benchmarks using fixed sample text and included narrator audio
+- Reported generation time, audio duration, and real-time factor
+- Auto-tuning across supported streaming decode batch sizes
+- Saved performance settings for future jobs
+
+### Voices and Voice Lab
+
+- Two included OpenMOSS narrator instruction/reference pairs
+- Preview included and custom voices before creating a job
+- Create reference candidates from narration instructions
+- Upload an existing reference recording and audition it against test sentences
+- Optional OpenMOSS sampling controls and deterministic candidate seeds
+- Save, rename, edit, or delete reusable custom voice profiles
+- Protection against deleting a profile while an unfinished job uses it
+- Automatic cleanup of discarded Voice Lab candidates
+
+### Reliable audiobook generation
+
+- Provider-sized chunks built on paragraph and sentence boundaries
+- Background generation with live progress that does not refresh the page
+- Pause after the current chunk or chapter, resume later, or stop a job
+- Retry handling and durable diagnostics for transient connection failures
+- Deterministic per-chunk seeds for repeatable retry and regeneration behavior
+- Playback, download, deletion, and selective regeneration of completed chunks
+- SQLite work leases that prevent duplicate generation against the same job or
+  TTS connection
+- Recovery of interrupted jobs after an application or container restart
+
+### Audio and export
+
+- Validation of streamed WAV responses before promotion
+- Lossless 48 kHz mono FLAC working masters
+- Chapterized AAC M4B export with title, author, cover art, and chapter markers
+- Direct FLAC-to-M4B assembly without storing duplicate chapter WAV files
+- A source-mapped narration report with settings and artifact hashes
+- Storage finalization that removes editable FLAC masters after the M4B is
+  approved
+
+## Quick start with Docker
+
+Docker Compose is the recommended way to run Narranova. You need:
+
+- Docker Engine with the Compose plugin
+- A separately running OpenMOSS server reachable from the container
+
+Clone the repository, copy the example configuration, and start the service:
 
 ```console
-PYTHONPATH=src python -m narranova init --data-dir ./data
-```
-
-Import and inspect a DRM-free EPUB:
-
-```console
-PYTHONPATH=src python -m narranova import ./book.epub --data-dir ./data
-PYTHONPATH=src python -m narranova books --data-dir ./data
-PYTHONPATH=src python -m narranova plan BOOK_ID --data-dir ./data
-```
-
-Run the foundation tests:
-
-```console
-PYTHONPATH=src python -m unittest discover -s tests/unit -v
-```
-
-## Implemented production slices
-
-- SQLite-backed application initialization and versioned migrations
-- Safe artifact paths and atomic writes
-- Defensive EPUB ZIP/XML parsing
-- Metadata, cover, spine, and readable-element extraction
-- Stable, source-mapped narration plans
-- Provider-sized chunk planning with content-loss verification
-- Dedicated external OpenMOSS streaming-PCM adapter
-- Controlled OpenMOSS connection benchmarks with Auto-tune recommendations
-- Temporary provider-WAV validation and 48 kHz mono FLAC normalization
-- Direct FLAC-to-M4B assembly without persistent chapter WAVs
-- Source-mapped narration-map export
-- FFmpeg-backed chapterized M4B export with metadata and cover art
-
-The OpenMOSS adapter deliberately preserves `stream=true`, PCM output,
-`stream_chunk_frames=16`, and the 6,000-token default. Reference cloning never
-sends `ref_text`. Narranova does not contain or launch the MOSS runtime.
-Connections store performance settings only. VoiceLab stores optional explicit
-quality/sampling overrides with a narrator profile; blank controls use the
-OpenMOSS engine default and are omitted from requests.
-
-The disposable audiobook and OpenMOSS WebUI prototypes have been removed.
-Verified lessons were reimplemented behind Narranova's production boundaries;
-the external MOSS runtime remains a separate service.
-
-## Docker
-
-Build and start Narranova with its persistent named volume:
-
-```console
+git clone https://github.com/huseynli/NarraNova.git
+cd NarraNova
 cp .env.example .env
 docker compose up --detach --build
 docker compose ps
 ```
 
-Open `http://127.0.0.1:8787`. The image runs as an unprivileged user, includes
-FFmpeg for FLAC normalization and M4B assembly, and stores the SQLite database
-and all artifacts in the `narranova-data` volume mounted at `/data`.
+Open [http://127.0.0.1:8787](http://127.0.0.1:8787).
 
-OpenMOSS is not included in this Compose project. If it runs on the Docker
-host, register `http://host.docker.internal:8000/tts` in Narranova rather than
-`127.0.0.1`; a host-gateway alias is provided for Linux and Docker Desktop.
-Use an ordinary service hostname instead when OpenMOSS runs elsewhere on a
-trusted network.
+The image includes FFmpeg and FFprobe, runs as an unprivileged user, exposes a
+health check, and stores all persistent state in the `narranova-data` volume at
+`/data`.
 
-Narranova has no built-in authentication yet. Keep port 8787 private or place
-it behind an authenticating reverse proxy before exposing it beyond a trusted
-network.
+### Connect OpenMOSS from Docker
 
-### Backup and upgrade
+Open the **Connections** page and add the full OpenMOSS `/tts` URL.
 
-Stop the application before copying the SQLite database and artifacts so the
-backup is consistent:
+If OpenMOSS is running directly on the same machine as Docker, use:
+
+```text
+http://host.docker.internal:8000/tts
+```
+
+The Compose configuration supplies this host alias on Linux and Docker Desktop.
+Do not use `127.0.0.1` for a host service: inside the container that address
+points back to Narranova itself.
+
+On Linux, OpenMOSS must listen on a host interface reachable through the Docker
+bridge, not only on the host's loopback interface. Restrict that listener with
+the host firewall rather than exposing it publicly.
+
+If OpenMOSS runs on another trusted machine, use that machine's hostname or LAN
+address. If it runs in another Compose project, place both services on a shared
+Docker network and use the OpenMOSS service name.
+
+### Docker configuration
+
+Copy `.env.example` to `.env` and adjust these values as needed:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `NARRANOVA_PORT` | `8787` | Port exposed on the Docker host |
+| `NARRANOVA_IMAGE` | `narranova:local` | Local image name and tag |
+| `NARRANOVA_VERSION` | `dev` | Version stored in the image metadata |
+| `TZ` | `UTC` | Container timezone, such as `America/Chicago` |
+
+Useful commands:
+
+```console
+docker compose logs --follow app
+docker compose restart app
+docker compose stop
+docker compose down
+```
+
+`docker compose down` does not remove the `narranova-data` volume. Do not add
+`--volumes` unless you intentionally want to delete the library, profiles,
+jobs, and generated audio.
+
+## Run locally without Docker
+
+Narranova requires:
+
+- Python 3.10 or newer
+- FFmpeg and FFprobe available on `PATH`
+- A separately running OpenMOSS service
+
+Create a virtual environment and install Narranova from the repository:
+
+```console
+git clone https://github.com/huseynli/NarraNova.git
+cd NarraNova
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install .
+narranova web --data-dir ./data
+```
+
+On Windows, activate the environment with `.venv\Scripts\activate` instead.
+Then open [http://127.0.0.1:8787](http://127.0.0.1:8787) and register the local
+OpenMOSS endpoint, commonly `http://127.0.0.1:8000/tts`.
+
+The server binds to loopback by default. To listen on a trusted LAN interface:
+
+```console
+narranova web --host 0.0.0.0 --port 8787 --data-dir ./data
+```
+
+Narranova does not currently provide authentication. Do not expose this port to
+the public internet without an authenticating reverse proxy and appropriate
+TLS/network controls.
+
+### Run from a source checkout
+
+For development or a quick test, installation is optional:
+
+```console
+PYTHONPATH=src python -m narranova web --data-dir ./data
+```
+
+## Create your first audiobook
+
+After opening the Web UI:
+
+1. Go to **Connections**, add the OpenMOSS `/tts` endpoint, and confirm that its
+   health indicator turns green. The **Benchmark** page can measure and save a
+   suitable streaming setting for that hardware.
+2. Go to **Voices** to preview the included pairs. Use **Voice Lab** if you want
+   to generate or upload a reference and save a custom instruction/audio pair.
+3. Return to **Library**, import an EPUB, and open its book page.
+4. Turn off any sections you do not want spoken. Changes save automatically.
+5. Review **Narration Enhancement** settings and add IPA entries for names or
+   unusual words when needed.
+6. Select **Set up narration**, choose the connection and narrator pair, and
+   create the job.
+7. Start generation from the job page. You can listen to completed chunks while
+   later chunks continue, pause safely, or regenerate an unsatisfactory take.
+8. When all chunks are complete, build the audiobook and download the M4B.
+9. After approving the result, optionally finalize storage to remove the
+   lossless working masters.
+
+Only DRM-free `.epub` files are currently accepted.
+
+## Persistent data, backup, and restore
+
+Narranova keeps the SQLite database, imported EPUBs, narration plans, voice
+references, job snapshots, generated chunks, and final artifacts together in
+one data directory. Docker uses `/data`; a local installation uses the path
+passed with `--data-dir` or the `NARRANOVA_DATA_DIR` environment variable.
+
+Stop Narranova before backing up the data directory so the SQLite database and
+artifacts are captured consistently.
+
+For the default Docker volume:
 
 ```console
 docker compose stop
@@ -93,111 +255,104 @@ docker run --rm --volume narranova-data:/data:ro --volume "$PWD":/backup \
 docker compose start
 ```
 
-Restore only into an empty `narranova-data` volume while the application is
-stopped. To upgrade a source checkout, back up first, then rebuild and restart;
-forward-only database migrations run automatically at startup:
+For a local installation, stop the process and archive or copy the complete
+directory supplied through `--data-dir`.
+
+Restore a backup only while Narranova is stopped, and restore the complete data
+directory into an empty destination. Do not restore only the SQLite file or
+only the artifact folders; their records and hashes belong together.
+
+## Updating
+
+Back up the data directory before upgrading. Database migrations are
+forward-only and run automatically when Narranova starts.
+
+For Docker:
 
 ```console
+git pull --ff-only
 docker compose build --pull
 docker compose up --detach
 docker compose ps
 ```
 
-## External OpenMOSS generation
-
-With OpenMOSS already running separately, register its endpoint. Each command
-prints the ID needed by the next command:
+For a local installation:
 
 ```console
-PYTHONPATH=src python -m narranova provider-add-openmoss "Local MOSS" \
-  http://127.0.0.1:8000/tts --data-dir ./data
-
-PYTHONPATH=src python -m narranova voice-create-openmoss PROVIDER_ID \
-  --reference ./approved-reference.wav \
-  --instruction "A warm, restrained fiction audiobook narrator." \
-  --data-dir ./data
-
-PYTHONPATH=src python -m narranova job-create BOOK_ID VOICE_PROFILE_ID \
-  --data-dir ./data
-PYTHONPATH=src python -m narranova job-run JOB_ID --data-dir ./data
-PYTHONPATH=src python -m narranova job-status JOB_ID --data-dir ./data
+git pull --ff-only
+source .venv/bin/activate
+python -m pip install --upgrade .
 ```
 
-Running `job-run` again resumes pending or failed work and skips completed FLAC
-masters whose hashes and audio streams still validate. From another shell,
-`job-pause JOB_ID` requests a pause after the current provider request finishes;
-running `job-run JOB_ID` resumes it. `job-cancel JOB_ID` requests an immediate
-stop, discards the active partial response, and keeps already verified chunks.
+Restart the local Narranova process after installation.
 
-After every chunk is complete, build and inspect the final deliverables:
+## Storage behavior
+
+Long audiobooks can produce many gigabytes of lossless working audio. Narranova
+stores each generated chunk as FLAC rather than retaining raw provider WAVs, and
+it assembles the final M4B without permanent chapter WAV intermediates.
+
+Completed jobs keep their FLAC chunks so individual takes can be regenerated.
+After listening to and approving the final M4B, use the job's storage
+finalization action to delete those editable masters while retaining the M4B,
+narration report, source book, job history, and voice snapshot.
+
+Deleting a chunk removes its corresponding audio file and returns it to pending.
+Deleting a job or book also removes its corresponding artifacts from disk.
+
+## Optional CLI
+
+The Web UI is the primary interface. A small CLI is available for automation
+and diagnostics:
 
 ```console
-PYTHONPATH=src python -m narranova job-assemble JOB_ID --data-dir ./data
-PYTHONPATH=src python -m narranova job-artifacts JOB_ID --data-dir ./data
+narranova --help
+narranova books --data-dir ./data
+narranova job-status JOB_ID --data-dir ./data
+narranova job-pause JOB_ID --data-dir ./data
+narranova job-cancel JOB_ID --data-dir ./data
 ```
 
-M4B export and FLAC normalization require `ffmpeg` and `ffprobe` on the
-Narranova host. Verified FLAC masters and the narration map are retained if M4B
-encoding fails, so the build can be retried after the tools are installed.
+The CLI and Web UI use the same database and artifact directory. Avoid running
+multiple Narranova instances against the same local data directory unless they
+share the same filesystem and you understand the operational implications.
 
-Jobs retain their lossless FLAC masters by default for individual chunk
-regeneration. After approving the M4B, remove those editable sources while
-keeping the final files and job history:
+## Troubleshooting
+
+### The OpenMOSS connection is red
+
+- Confirm that the URL ends in `/tts` and that OpenMOSS is running.
+- From Docker, use `host.docker.internal` instead of `127.0.0.1` for a service
+  running on the Docker host.
+- Check host firewalls and whether OpenMOSS is listening on an address reachable
+  from the container or Narranova machine.
+- Open the connection's benchmark page and use **Test connection** for returned
+  error details.
+
+### M4B assembly fails
+
+Docker already includes FFmpeg. For a local installation, verify both tools:
 
 ```console
-PYTHONPATH=src python -m narranova job-compact JOB_ID --data-dir ./data
+ffmpeg -version
+ffprobe -version
 ```
 
-Running `job-run` on a compacted job regenerates its editable masters and
-invalidates the old derived M4B so it can be rebuilt.
+Narranova retains verified FLAC chunks if assembly fails, so the export can be
+retried after fixing the local FFmpeg installation.
 
-## Web interface
+### Docker starts but cannot write `/data`
 
-Run the local server against the same data directory used by the CLI:
+The supplied Compose file uses a managed named volume with the correct image
+permissions. If you replace it with a bind mount, ensure host UID/GID `10001`
+can write the mounted directory.
+
+## Development
+
+Run the test suite from the repository root:
 
 ```console
-PYTHONPATH=src python -m narranova web --data-dir ./data
+PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-Open `http://127.0.0.1:8787`. The web interface supports EPUB upload, library
-and narration-plan review, per-section narration inclusion, a dedicated TTS
-connections page, two packaged OpenMOSS narrator pairs, and a book-independent
-Voice Lab for comparing short custom auditions. The built-in pairs include their
-exact instruction, reference text, and WAV; users can preview them in the voice
-library and select one directly when creating a narration job. Voice Lab first
-creates reference candidates from narration
-direction alone or an optional uploaded/generated source, then pairs the chosen
-reference with final instructions as a named reusable profile. Existing profiles
-are not offered as the new profile's final pair. Connections and profiles can be
-edited, renamed, or deleted. Each connection can be health-tested and benchmarked
-with fixed text, narrator, instruction, seed, and engine-default sampling. Auto-tune
-measures streaming decode batches 16 through 512, recommends the smallest result
-within 3% of peak throughput, and can apply it to future jobs. Each generation job
-owns immutable connection-performance and voice snapshots
-and copied reference WAV. Profiles used by unfinished jobs are visibly marked and
-protected from deletion until those jobs complete or are deleted; deleting the
-profile afterward removes its own files without breaking completed jobs. Saving a
-profile removes its discarded draft audio. The interface also supports durable job creation,
-background generation, pause/resume, status, verified FLAC chunk playback,
-pause-after-chapter, selective chunk regeneration, direct M4B assembly,
-storage finalization, and
-final artifact downloads.
-Generation uses durable SQLite leases so separate CLI and web processes cannot
-run the same job—or concurrent requests against the same TTS connection—at the
-same time. Transient connection failures receive bounded retries, and each
-attempt records timing and provider diagnostics. Voice Lab auditions run in the
-background and report completion without blocking the HTTP request.
-VoiceLab's collapsed advanced section exposes optional OpenMOSS sampling controls
-and manual candidate seeds. Audiobook chunks use deterministic per-chunk seeds so
-retries and regeneration remain reproducible without making every chunk identical.
-Saving section choices creates an immutable plan revision; existing jobs retain
-their original plan and new jobs use the latest revision. The server binds to
-loopback by default; use `--host` deliberately when exposing it to a trusted
-network.
-
-Each book also has deterministic Narration Enhancement settings. New jobs can
-add configurable chapter, section-heading, and scene-break pauses using native
-OpenMOSS `[pause X.Ys]` controls, normalize common TTS typography, and apply a
-book-specific `term = IPA` pronunciation dictionary. Narranova stores the
-unchanged chunk text and a separate, hashed provider-input snapshot, so editing
-book settings never changes an existing job or the author's extracted prose.
+Project decisions and planned work are tracked in `PROJECT_PLAN.md`.
