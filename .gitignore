@@ -1,5 +1,4 @@
-*.md
-!PROJECT_PLAN.md
+PROJECT_PLAN.md
 AUDIOBOOK_PIPELINE.md
 __pycache__/
 *.py[cod]
