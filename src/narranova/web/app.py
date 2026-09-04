@@ -122,14 +122,16 @@ class NarranovaWebApp:
                 "/static/choices.css",
                 "/static/app.js",
                 "/static/theme.js",
+                "/static/favicon.svg",
             }:
                 asset_name = path.rsplit("/", 1)[-1]
                 content = files("narranova.web.static").joinpath(asset_name).read_bytes()
-                content_type = (
-                    "text/javascript; charset=utf-8"
-                    if asset_name.endswith(".js")
-                    else "text/css; charset=utf-8"
-                )
+                if asset_name.endswith(".js"):
+                    content_type = "text/javascript; charset=utf-8"
+                elif asset_name.endswith(".svg"):
+                    content_type = "image/svg+xml"
+                else:
+                    content_type = "text/css; charset=utf-8"
                 return self._respond(start_response, "200 OK", content, content_type)
             if method == "GET" and path == "/":
                 return self._html(start_response, self._dashboard(environ, csrf), set_cookie)
@@ -1630,7 +1632,7 @@ class NarranovaWebApp:
             f'<a href="{href}" class="{"active" if active else ""}">{label}</a>'
             for href, label, active in nav
         )
-        return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>{self._e(title)} · Narranova</title>{refresh_tag}<script src="/static/theme.js"></script><link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/choices.css"><script defer src="/static/app.js"></script></head><body><header class="topbar"><div class="topbar-inner"><a class="brand" href="/"><span>N</span><strong>Narranova</strong></a><nav aria-label="Primary navigation">{nav_html}</nav><div class="topbar-actions"><button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false"><span class="theme-icon" aria-hidden="true"></span><span data-theme-label>Dark</span></button></div></div></header><div class="shell">{notice_html}{body}</div><footer>Narranova · Local-first audiobook production</footer></body></html>"""
+        return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>{self._e(title)} · Narranova</title><link rel="icon" href="/static/favicon.svg" type="image/svg+xml">{refresh_tag}<script src="/static/theme.js"></script><link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/choices.css"><script defer src="/static/app.js"></script></head><body><header class="topbar"><div class="topbar-inner"><a class="brand" href="/"><span>N</span><strong>Narranova</strong></a><nav aria-label="Primary navigation">{nav_html}</nav><div class="topbar-actions"><button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false"><span class="theme-icon" aria-hidden="true"></span><span data-theme-label>Dark</span></button></div></div></header><div class="shell">{notice_html}{body}</div><footer>Narranova · Local-first audiobook production</footer></body></html>"""
 
     def _parse_form(self, environ: dict[str, object]) -> tuple[dict[str, str], dict[str, Upload]]:
         try:

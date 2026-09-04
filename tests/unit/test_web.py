@@ -63,6 +63,7 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b"New book", body)
             self.assertIn(b"data-theme-toggle", body)
             self.assertIn(b'<script src="/static/theme.js"></script>', body)
+            self.assertIn(b'<link rel="icon" href="/static/favicon.svg"', body)
             self.assertNotIn(b"Add a DRM-free book to your production library", body)
             self.assertNotIn(b">Book file</label>", body)
             self.assertIn(b'aria-label="Choose an EPUB book"', body)
@@ -116,6 +117,11 @@ class WebAppTests(unittest.TestCase):
             self.assertIn(b'Regenerate', script)
             self.assertNotIn(b"location.reload", script)
             self.assertIn(("Content-Type", "text/javascript; charset=utf-8"), headers)
+
+            status, headers, favicon = request(app, "/static/favicon.svg")
+            self.assertEqual(status, "200 OK")
+            self.assertIn(b'aria-label="Narranova"', favicon)
+            self.assertIn(("Content-Type", "image/svg+xml"), headers)
             self.assertTrue(ThreadingWSGIServer.daemon_threads)
 
             status, headers, bootstrap = request(app, "/static/theme.js")
