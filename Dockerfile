@@ -3,7 +3,7 @@
 FROM python:3.12-slim-bookworm AS builder
 
 WORKDIR /build
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 RUN python -m pip wheel --no-cache-dir --wheel-dir /wheels .
 

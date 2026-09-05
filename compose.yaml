@@ -2,11 +2,7 @@ name: narranova
 
 services:
   app:
-    image: narranova:local
-    build:
-      context: .
-      args:
-        NARRANOVA_VERSION: dev
+    image: ghcr.io/huseynli/narranova:latest
     restart: unless-stopped
     ports:
       - "8787:8787"
@@ -15,6 +11,12 @@ services:
       TZ: UTC
     volumes:
       - narranova-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
       test:
         - CMD

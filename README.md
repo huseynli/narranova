@@ -30,8 +30,7 @@ Website: [narranova.app](https://narranova.app)
 A typical audiobook moves through this workflow:
 
 1. Import a DRM-free EPUB into the library.
-2. Review the extracted sections and exclude front matter, tables of contents,
-   copyright pages, or anything else you do not want narrated.
+2. Review the extracted sections and exclude front matter, tables of contents, or anything else you do not want narrated.
 3. Connect an OpenMOSS server and benchmark it for the host hardware.
 4. Choose one of the included narrator pairs or build a reusable custom voice
    profile in Voice Lab.
@@ -66,20 +65,25 @@ Docker Compose is the recommended way to run Narranova. You need:
 - Docker Engine with the Compose plugin
 - A separately running OpenMOSS server reachable from the container
 
-Clone the repository and start the service:
+Clone the repository and start the prebuilt image:
 
 ```console
 git clone https://github.com/huseynli/narranova.git
 cd narranova
-docker compose up --detach --build
+docker compose up -d
 docker compose ps
 ```
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787).
 
+Compose pulls `ghcr.io/huseynli/narranova:latest`. To stay on a specific
+release, replace `latest` in `compose.yaml` with a version tag such as `0.1.0`.
 The image includes FFmpeg and FFprobe, runs as an unprivileged user, exposes a
-health check, and stores all persistent state in the `narranova-data` volume at
-`/data`.
+health check, and stores persistent state in the `narranova-data` volume.
+
+For Portainer, create a Stack from this repository's `compose.yaml`, or paste
+its contents into the Web editor. Deploying the stack pulls the same prebuilt
+image and creates the persistent data volume.
 
 ### Connect OpenMOSS
 
@@ -88,9 +92,9 @@ host inference and use a model from
 [moss-tts-local-gguf](https://huggingface.co/ilintar/moss-tts-local-gguf). Then
 open Narranova's **Connections** page and enter its reachable `/tts` endpoint.
 
-The default Compose file builds `narranova:local`, publishes port `8787`, uses
-the `UTC` timezone, and persists `/data` in the `narranova-data` volume. Edit
-`compose.yaml` directly if those defaults do not fit your installation.
+The default Compose file publishes port `8787`, uses the `UTC` timezone, and
+persists `/data` in the `narranova-data` volume. Edit `compose.yaml` if those
+defaults do not fit your installation.
 
 Useful commands:
 
@@ -104,6 +108,18 @@ docker compose down
 `docker compose down` does not remove the `narranova-data` volume. Do not add
 `--volumes` unless you intentionally want to delete the library, profiles,
 jobs, and generated audio.
+
+### Build the Docker image locally
+
+Developers can layer `compose.dev.yaml` over the normal configuration to build
+the repository's Dockerfile instead of pulling the published image:
+
+```console
+docker compose -f compose.yaml -f compose.dev.yaml up --build
+```
+
+The override only changes the image source; ports, storage, health checks, and
+the other runtime settings continue to come from `compose.yaml`.
 
 ## Run locally without Docker
 
@@ -204,8 +220,8 @@ For Docker:
 
 ```console
 git pull --ff-only
-docker compose build --pull
-docker compose up --detach
+docker compose pull
+docker compose up -d
 docker compose ps
 ```
 

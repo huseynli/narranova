@@ -1,0 +1,7 @@
+services:
+  app:
+    image: narranova:local
+    build:
+      context: .
+      args:
+        NARRANOVA_VERSION: dev
