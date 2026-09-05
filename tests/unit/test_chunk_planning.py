@@ -28,6 +28,13 @@ def example_plan():
 
 
 class ChunkPlannerTests(unittest.TestCase):
+    def test_default_character_budget_targets_shorter_audio(self) -> None:
+        planner = ChunkPlanner()
+
+        self.assertEqual(planner.min_chars, 3_840)
+        self.assertEqual(planner.target_chars, 4_800)
+        self.assertEqual(planner.max_chars, 5_760)
+
     def test_chunks_on_unit_and_sentence_boundaries_without_content_loss(self) -> None:
         plan = example_plan()
         planner = ChunkPlanner(target_chars=30, min_chars=20, max_chars=35)

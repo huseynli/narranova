@@ -43,7 +43,7 @@ class SynthesisChunk:
 
 
 class ChunkPlanner:
-    def __init__(self, target_chars: int = 6000, min_chars: int = 4800, max_chars: int = 7200) -> None:
+    def __init__(self, target_chars: int = 4800, min_chars: int = 3840, max_chars: int = 5760) -> None:
         if not 0 < min_chars <= target_chars <= max_chars:
             raise ValueError("Expected 0 < min_chars <= target_chars <= max_chars")
         self.target_chars = target_chars
