@@ -103,6 +103,7 @@ class VoiceProfiles:
         name: str | None = None,
         language: str = "English",
         sampling: Mapping[str, object] | None = None,
+        sample_text: str | None = None,
     ) -> str:
         provider = self.repository.get_provider(provider_id)
         if provider["kind"] != "openmoss" or not provider["enabled"]:
@@ -130,6 +131,8 @@ class VoiceProfiles:
             "reference_artifact_path": destination.relative_to(self.layout.root).as_posix(),
             "reference_sha256": reference_hash,
         }
+        if sample_text and sample_text.strip():
+            profile["sample_text"] = sample_text.strip()
         if sampling_overrides:
             profile["sampling"] = dict(sampling_overrides)
         profile_hash = hashlib.sha256(_canonical_json(profile).encode("utf-8")).hexdigest()
@@ -193,6 +196,8 @@ class VoiceProfiles:
             "reference_artifact_path": destination.relative_to(self.layout.root).as_posix(),
             "reference_sha256": reference_hash,
         }
+        if reference_audio is None and current_profile.get("sample_text"):
+            profile["sample_text"] = current_profile["sample_text"]
         if sampling_overrides:
             profile["sampling"] = dict(sampling_overrides)
         profile_hash = hashlib.sha256(_canonical_json(profile).encode("utf-8")).hexdigest()

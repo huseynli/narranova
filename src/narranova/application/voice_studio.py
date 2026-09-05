@@ -25,28 +25,20 @@ from narranova.providers import (
 
 INSTRUCTION_PRESETS: tuple[tuple[str, str], ...] = (
     (
-        "Natural contemporary fiction",
-        "Read as a polished contemporary audiobook narrator: conversational and grounded, "
-        "with crisp diction, medium pacing, and natural sentence endings. Keep character "
-        "dialogue distinct through subtle rhythm and attitude, not impersonation.",
+        "Natural narration",
+        "Read naturally with clear diction and a steady, conversational pace.",
     ),
     (
-        "Expansive science fiction",
-        "Narrate with calm authority and a sense of scale. Keep exposition lucid, technical "
-        "terms precise, and pacing deliberate without becoming slow. Let wonder, tension, "
-        "and dry humor emerge from the prose; use restrained distinctions for dialogue.",
+        "Calm narration",
+        "Read calmly and clearly at a relaxed, even pace.",
     ),
     (
-        "Intimate mystery",
-        "Use a close, observant delivery with controlled tension. Favor clean pauses, "
-        "purposeful emphasis, and a steady pace. Keep revelations understated and dialogue "
-        "believable; avoid trailer-style intensity, whispering, or exaggerated suspense.",
+        "Warm narration",
+        "Read with a warm, friendly tone and gentle expression.",
     ),
     (
-        "Direct narrative nonfiction",
-        "Read with clarity, curiosity, and quiet confidence. Maintain an even, energetic "
-        "pace, articulate names and numbers carefully, and use brief pauses to separate "
-        "ideas. Sound engaged rather than promotional, academic, or overly solemn.",
+        "Dramatic narration",
+        "Read with controlled tension and subtle emphasis, without exaggeration.",
     ),
 )
 
@@ -269,7 +261,10 @@ class VoiceStudio:
             raise ValueError(
                 "Choose a reference created or uploaded in this Voice Lab draft"
             )
-        reference = self._reference(draft, reference_choice, required=True)
+        reference = self._artifact(str(pair_take["audio_path"]))
+        validate_wave(reference)
+        if self.store.sha256(reference) != pair_take["audio_sha256"]:
+            raise RuntimeError("Selected generated reference failed hash validation")
         sampling = dict(pair_take.get("sampling") or {})
         profile_id = self.profiles.create_openmoss_profile(
             provider_id=provider_id,
@@ -278,6 +273,7 @@ class VoiceStudio:
             name=name,
             language=language.strip() or "English",
             sampling=sampling,
+            sample_text=str(pair_take["sample_text"]),
         )
         self.discard(draft_id)
         return profile_id
