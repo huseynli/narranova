@@ -80,6 +80,7 @@ class VoiceStudioTests(unittest.TestCase):
                 saved["profile"]["sampling"],
                 {"audio_temperature": 0.8, "seed": 123},
             )
+            self.assertEqual(saved["profile"]["sample_text"], DEFAULT_SAMPLE_TEXT)
             self.assertEqual(store.sha256(saved_path), selected_hash)
             self.assertEqual(len(fake.requests), 2)
             self.assertIsNone(fake.requests[0].reference_audio)
@@ -170,6 +171,9 @@ class VoiceStudioTests(unittest.TestCase):
                 language="English",
                 uploaded_reference=reference,
             )
+            selected_take_hash = store.sha256(
+                layout.voice_studio_take(draft_id, take_id)
+            )
 
             profile_id = studio.save_profile(
                 draft_id,
@@ -186,7 +190,10 @@ class VoiceStudioTests(unittest.TestCase):
                 saved["instruction"], "Keep the uploaded voice calm and precise."
             )
             self.assertEqual(saved["language"], "English")
-            self.assertEqual(store.sha256(saved_path), store.sha256(reference))
+            self.assertEqual(saved["sample_text"], DEFAULT_SAMPLE_TEXT)
+            self.assertEqual(store.sha256(saved_path), selected_take_hash)
+            self.assertNotEqual(store.sha256(saved_path), store.sha256(reference))
+            self.assertFalse(layout.voice_studio_draft(draft_id).exists())
 
 
 if __name__ == "__main__":
