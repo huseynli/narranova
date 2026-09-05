@@ -18,6 +18,13 @@ Website: [narranova.app](https://narranova.app)
 > [moss-tts-local-gguf](https://huggingface.co/ilintar/moss-tts-local-gguf)
 > model, then connect Narranova to its `/tts` endpoint.
 
+> [!WARNING]
+> You are solely responsible for ensuring that you have the legal right to
+> import, process, store, and distribute each book and any resulting audiobook.
+> Use Narranova only with content you own, content in the public domain, or
+> content for which you have the necessary permission or license. Narranova and
+> its contributors do not verify, provide, or grant rights to uploaded content.
+
 ## What Narranova does
 
 A typical audiobook moves through this workflow:
@@ -280,3 +287,9 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
 Project decisions and planned work are tracked in `PROJECT_PLAN.md`.
+
+## License
+
+Narranova is licensed under the [GNU Affero General Public License v3.0](LICENSE)
+(`AGPL-3.0-only`). It is provided without warranty; see the license for the
+complete terms.
